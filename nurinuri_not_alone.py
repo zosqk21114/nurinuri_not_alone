@@ -247,3 +247,249 @@ with tab1:
         st.dataframe(daily_first[["date","timestamp","temperature","weather"]].sort_values("date",ascending=False).head(20), use_container_width=True)
 
 # Part1 끝 — Part2/3 이어서 붙여넣으세요.
+# -------------------------
+# Part 2/3: 복약 스케줄러, 리마인더, 병원 추천
+# (Part1 바로 아래에 붙여넣기)
+# -------------------------
+
+# -------------------------
+# 유틸: 거리 계산 (haversine)
+# -------------------------
+import math
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    phi1 = math.radians(lat1); phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1); dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2.0)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+# -------------------------
+# TAB3: 복약 스케줄러 / 리마인더
+# -------------------------
+with tab3:
+    st.header("③ 복약 스케줄러 / 리마인더")
+    st.info("앱이 열려 있을 때만 리마인더가 표시됩니다. (프로토타입)")
+
+    # --- 약 추가 폼 ---
+    with st.form("add_med_form", clear_on_submit=True):
+        mcol1, mcol2, mcol3 = st.columns([3,2,2])
+        with mcol1:
+            med_name = st.text_input("약 이름", placeholder="예: 고혈압약")
+        with mcol2:
+            interval = st.number_input("간격(시간)", min_value=1, max_value=48, value=24, step=1)
+        with mcol3:
+            start_time = st.text_input("첫 복용 시각 (HH:MM)", value="08:00")
+        notes = st.text_input("메모 (선택)")
+        submitted = st.form_submit_button("약 등록")
+
+    if submitted:
+        if not med_name or not start_time:
+            st.error("이름과 시작 시각을 확인하세요.")
+        else:
+            try:
+                # append safely
+                meds = pd.concat([meds, pd.DataFrame([{"name":med_name,"interval_hours":int(interval),"start_time":start_time,"notes":notes}])], ignore_index=True)
+                save_csv_safe(meds, MEDS_FILE)
+                st.success(f"약 등록 완료: {med_name}")
+            except Exception as e:
+                st.error(f"등록 실패: {e}")
+
+    # --- 등록된 약 표시 및 삭제 버튼 ---
+    if not meds.empty:
+        st.subheader("등록된 약")
+        st.dataframe(meds.reset_index(drop=True), use_container_width=True)
+        # 삭제 UI
+        to_delete = st.selectbox("삭제할 약 선택", options=["(선택안함)"] + meds["name"].astype(str).tolist(), index=0)
+        if to_delete != "(선택안함)":
+            if st.button("선택한 약 삭제"):
+                meds = meds[meds["name"] != to_delete].reset_index(drop=True)
+                save_csv_safe(meds, MEDS_FILE)
+                st.success(f"삭제됨: {to_delete}")
+
+    else:
+        st.info("등록된 약이 없습니다. 약을 추가해보세요.")
+
+    st.markdown("---")
+    st.subheader("⚠️ 약물 상호작용 (간단 예시)")
+    # 간단 데모 DB: 실제 서비스용 아님
+    interaction_db = {
+        "타이레놀": ["술", "이부프로펜"],
+        "아스피린": ["이부프로펜", "와파린"],
+        "이부프로펜": ["술", "아스피린"],
+        "항생제": ["유제품"],
+        "혈압약": ["자몽"]
+    }
+
+    if not meds.empty:
+        for _, r in meds.iterrows():
+            name = str(r.get("name",""))
+            warnings = interaction_db.get(name, [])
+            if warnings:
+                st.warning(f"❗ {name} 복용 시 주의: {', '.join(warnings)}")
+            else:
+                st.info(f"ℹ️ {name} : 등록된 주의사항 없음")
+
+    st.markdown("---")
+    st.subheader("⏰ 리마인더 (지금 열려있을 때만)")
+
+    # 리마인더 계산 함수
+    def due_now_list(meds_df, within_minutes=15, overdue_minutes=90):
+        now = datetime.now(tz=KST)
+        due_items = []
+        if meds_df is None or meds_df.empty:
+            return due_items
+        for _, row in meds_df.iterrows():
+            name = row.get("name")
+            try:
+                iv = int(row.get("interval_hours", 24))
+            except:
+                iv = 24
+            # parse start_time safely
+            try:
+                hh, mm = map(int, str(row.get("start_time","08:00")).split(":"))
+                start_clock = dtime(hh, mm)
+            except:
+                continue
+            # enumerate due times within last 2 days ~ next 1 day
+            start_at = datetime.combine((now - timedelta(days=2)).date(), start_clock, tzinfo=KST)
+            dues = []
+            cur = start_at
+            while cur <= (now + timedelta(days=1)):
+                dues.append(cur)
+                cur += timedelta(hours=iv)
+            if not dues:
+                continue
+            closest = min(dues, key=lambda d: abs((d - now).total_seconds()))
+            diff_min = (closest - now).total_seconds()/60.0
+            status = None
+            if abs(diff_min) <= within_minutes:
+                status = "due"
+            elif diff_min < 0 and abs(diff_min) <= overdue_minutes:
+                status = "overdue"
+            if status:
+                # check med_log to see if already taken near this due
+                taken = False
+                if not med_log.empty:
+                    try:
+                        med_log["taken_at_dt"] = pd.to_datetime(med_log["taken_at"], errors="coerce")
+                        cand = med_log[(med_log["name"]==name) & (med_log["taken_at_dt"].between(closest - timedelta(minutes=60), closest + timedelta(minutes=60)))]
+                        if len(cand):
+                            taken = True
+                    except Exception:
+                        taken = False
+                if not taken:
+                    due_items.append({"name": name, "due_time": closest, "status": status})
+        return due_items
+
+    due_items = due_now_list(meds)
+    if due_items:
+        for idx, it in enumerate(due_items):
+            status = "🕒 예정" if it["status"]=="due" else "⏰ 연체"
+            st.warning(f"{status}: {it['name']} / 예정시각: {it['due_time'].astimezone(KST).strftime('%Y-%m-%d %H:%M')}")
+            c1, c2 = st.columns([1,1])
+            with c1:
+                if st.button(f"✅ 복용 기록 ({idx})", key=f"take_{idx}"):
+                    # 기록 추가
+                    newr = {"name": it["name"], "due_time": it["due_time"].isoformat(), "taken_at": datetime.now(tz=KST).isoformat()}
+                    med_log = pd.concat([med_log, pd.DataFrame([newr])], ignore_index=True)
+                    save_csv_safe(med_log, MEDLOG_FILE)
+                    st.success(f"{it['name']} 복용 기록 완료")
+            with c2:
+                st.write("")  # placeholder for layout
+    else:
+        st.success("현재 예정/연체 항목 없음")
+
+    # 최근 복용 기록 테이블
+    if not med_log.empty:
+        st.markdown("#### 최근 복용 기록")
+        st.dataframe(med_log.sort_values("taken_at", ascending=False).head(100), use_container_width=True)
+
+# -------------------------
+# TAB4: 주변 의료기관 찾기 (사용자 위치 or 업로드된 CSV)
+# -------------------------
+with tab4:
+    st.header("④ 주변 의료기관 찾기")
+    st.markdown("위치(시/구)를 입력하거나, 전국 의료기관 CSV를 업로드하면 반경 내 기관을 추천합니다.")
+
+    user_loc = st.text_input("내 위치 입력 (예: 서울특별시 강남구)", value="")
+    radius_km = st.slider("검색 반경 (km)", 1, 20, 3)
+
+    inst_file = st.file_uploader("전국 의료기관 CSV 업로드 (선택)", type=["csv"])
+    institutions = pd.DataFrame()
+    if inst_file is not None:
+        try:
+            raw = inst_file.read()
+            for enc in ("utf-8-sig","utf-8","cp949","euc-kr","latin1"):
+                try:
+                    institutions = pd.read_csv(BytesIO(raw), encoding=enc)
+                    break
+                except Exception:
+                    continue
+            if institutions.empty:
+                st.error("CSV 읽기 실패. 다른 인코딩으로 저장되었을 수 있습니다.")
+        except Exception as e:
+            st.error(f"업로드 오류: {e}")
+    else:
+        # try load cached
+        if os.path.exists("institutions.csv"):
+            institutions = read_csv_safe("institutions.csv")
+
+    # If user entered location, geocode to lat/lon
+    user_lat, user_lon = None, None
+    if user_loc:
+        try:
+            geolocator = Nominatim(user_agent="nurinuri_not_alone_app")
+            loc = geolocator.geocode(user_loc, timeout=10)
+            if loc:
+                user_lat, user_lon = loc.latitude, loc.longitude
+                st.success(f"검색 위치: {user_loc} ({user_lat:.3f}, {user_lon:.3f})")
+            else:
+                st.error("위치를 찾을 수 없습니다. 입력을 확인하세요.")
+        except Exception as e:
+            st.error(f"위치 조회 실패: {e}")
+
+    # If institutions provided, try find nearby
+    if not institutions.empty and (user_lat is not None and user_lon is not None):
+        # try normalize lat/lon cols
+        lat_col = None; lon_col = None
+        for c in institutions.columns:
+            lc = c.lower()
+            if lc in ("lat","latitude","위도","y","coord_y"): lat_col = c
+            if lc in ("lon","lng","longitude","경도","x","coord_x"): lon_col = c
+        if lat_col and lon_col:
+            institutions["lat_num"] = pd.to_numeric(institutions[lat_col], errors="coerce")
+            institutions["lon_num"] = pd.to_numeric(institutions[lon_col], errors="coerce")
+            institutions = institutions.dropna(subset=["lat_num","lon_num"])
+            institutions["distance_km"] = institutions.apply(lambda r: haversine_km(user_lat, user_lon, r["lat_num"], r["lon_num"]), axis=1)
+            near = institutions[institutions["distance_km"]<=radius_km].sort_values("distance_km").head(50)
+            if not near.empty:
+                st.markdown("### 반경 내 기관 (거리순)")
+                show_cols = [c for c in ("name","기관명","의료기관명","address","주소") if c in near.columns]
+                # fallback show a few columns
+                if not show_cols:
+                    show_cols = list(near.columns[:min(6,len(near.columns))])
+                st.dataframe(near[show_cols + ["distance_km"]].head(50), use_container_width=True)
+            else:
+                st.info("반경 내 기관이 없습니다.")
+        else:
+            st.warning("업로드된 CSV에 위도/경도 컬럼이 필요합니다. (lat/lon 등)")
+    elif user_lat is not None and user_lon is not None:
+        # No institutions file: use Nominatim to search hospitals near the place
+        try:
+            query = f"hospital near {user_loc}"
+            geolocator = Nominatim(user_agent="nurinuri_not_alone_app")
+            results = geolocator.geocode(query, exactly_one=False, limit=8, timeout=10)
+            if results:
+                hlist = []
+                for r in results:
+                    hlist.append({"name": r.address, "lat": r.latitude, "lon": r.longitude, "distance_km": haversine_km(user_lat, user_lon, r.latitude, r.longitude)})
+                hdf = pd.DataFrame(hlist).sort_values("distance_km")
+                st.dataframe(hdf.head(20), use_container_width=True)
+            else:
+                st.info("검색된 병원이 없습니다.")
+        except Exception as e:
+            st.error(f"병원 검색 실패: {e}")
+    else:
+        st.info("위치를 입력하면 병원을 추천합니다 (또는 CSV 업로드).")
+
+# Part2 끝 — Part3/3 이어서 붙여넣으세요.
