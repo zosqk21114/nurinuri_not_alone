@@ -72,30 +72,71 @@ med_log = st.session_state.get("med_log", [])
 
 
 # ---------------------------- 🐶 Daily Check-in (강아지 사진 클릭 기능) ----------------------------
+# 🌞 데일리 체크인 (강아지 클릭 → 날씨 + 인사)
+import requests
+from datetime import datetime
+from gtts import gTTS
+import streamlit as st
+import pandas as pd
+import io
 
 st.subheader("🐾 오늘도 안녕, 똥강아지!")
 
-# 강아지 이미지로 체크인 버튼 대체
-dog_image_url = "https://i.imgur.com/YOUR_DOG_IMAGE.jpg"  # 사용자가 줄 URL
-clicked = st.button("🐶 오늘 하루 인사하기")
+CHECKIN_FILE = "checkins.csv"
 
-if clicked:
-    new_checkin = pd.DataFrame({
-        "timestamp": [datetime.now()],
-        "message": ["오늘도 잘 지냈어요!"]
-    })
+# CSV 불러오기
+try:
+    checkins = pd.read_csv(CHECKIN_FILE)
+except FileNotFoundError:
+    checkins = pd.DataFrame(columns=["timestamp", "message"])
+
+# ✅ 강아지 이미지 (사용자 제공 URL)
+dog_image_url = "https://i.imgur.com/YOUR_DOG_IMAGE.jpg"  # 🔸 네 이미지 URL로 바꿔줘
+st.image(dog_image_url, use_container_width=True)
+st.caption("🐕 강아지를 눌러서 오늘의 인사를 남기고 날씨를 들어요!")
+
+# ✅ 날씨 가져오기 (API 키 없이 Open-Meteo)
+def get_weather():
+    try:
+        res = requests.get(
+            "https://api.open-meteo.com/v1/forecast?latitude=37.5665&longitude=126.9780&current=temperature_2m,weathercode"
+        )
+        data = res.json().get("current", {})
+        temp = data.get("temperature_2m", "알 수 없음")
+        code = data.get("weathercode", 0)
+        weather = {
+            0: "맑아요 ☀️", 1: "대체로 맑아요 🌤️", 2: "약간 흐려요 ⛅", 3: "흐려요 ☁️",
+            45: "안개가 껴요 🌫️", 51: "이슬비가 내려요 🌧️", 61: "비가 와요 🌧️",
+            71: "눈이 와요 ❄️", 95: "천둥번개가 쳐요 ⛈️"
+        }.get(code, "알 수 없는 날씨예요 🌈")
+        return f"지금 서울의 기온은 {temp}도이고, {weather}"
+    except:
+        return "날씨 정보를 불러오지 못했어요."
+
+# ✅ 버튼 클릭 시: 오늘 인사 + 날씨 음성 재생
+if st.button("🐶 오늘 하루 인사하기"):
+    now = datetime.now()
+    weather_info = get_weather()
+    message = f"오늘은 {now.strftime('%m월 %d일')}! {weather_info} 똥강아지도 잘 지내요! 💕"
+
+    # 체크인 기록 저장
+    new_checkin = pd.DataFrame({"timestamp": [now], "message": [message]})
     checkins = pd.concat([checkins, new_checkin], ignore_index=True)
     checkins.to_csv(CHECKIN_FILE, index=False)
-    st.success("오늘도 잘 지냈다고 기록했어요 💕")
 
-st.image(dog_image_url, use_container_width=True)
-st.caption("🐕 강아지를 눌러서 매일 안부를 남겨요!")
+    # TTS 음성 생성 (바로 재생)
+    tts = gTTS(message, lang="ko")
+    buf = io.BytesIO()
+    tts.write_to_fp(buf)
+    st.audio(buf, format="audio/mp3")
 
-# 최근 기록 보여주기
+    st.success("오늘의 인사와 날씨가 기록되었어요 💕")
+
+# ✅ 최근 3일 기록 표시
 if not checkins.empty:
-    last = checkins.tail(3)
     st.write("📅 최근 기록")
-    st.dataframe(last)
+    st.dataframe(checkins.tail(3))
+
 
 # ---------------------------- 🌤️ 날씨 정보 ----------------------------
 st.subheader("🌤️ 오늘의 날씨")
