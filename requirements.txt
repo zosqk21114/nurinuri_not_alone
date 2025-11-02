@@ -4,5 +4,5 @@ geopy
 requests
 SpeechRecognition
 gtts
-playsound
+pygame==2.6.1
 chardet
