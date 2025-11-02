@@ -1,7 +1,7 @@
 streamlit
 pandas
-geopy
+numpy
+pydeck
+openpyxl
 requests
-SpeechRecognition
-gtts
-pygame
+chardet
