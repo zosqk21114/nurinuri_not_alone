@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+import requests
 from datetime import datetime, timedelta, time as dtime
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -13,9 +14,9 @@ import os, json, re, base64, math
 
 KST = ZoneInfo("Asia/Seoul")
 
-# -------------------------
+# ------------------------
 # 파일 / 상수
-# -------------------------
+# ------------------------
 CHECKIN_CSV = "checkins.csv"
 MEDS_CSV = "meds.csv"
 MEDLOG_CSV = "med_log.csv"
@@ -24,9 +25,41 @@ REGIONAL_CSV = "regional_factors.csv"
 HOME_JSON = "home_location.json"
 CONTACTS_JSON = "contacts.json"
 
-# -------------------------
-# 소리(내장 WAV)
-# -------------------------
+# 강아지 이미지 (사용자가 준 URL 사용)
+DOG_URL_IDLE = "https://marketplace.canva.com/yKgYw/MAGz2eyKgYw/1/tl/canva-cartoon-illustration-of-a-happy-brown-poodle-MAGz2eyKgYw.png"
+DOG_URL_SMILE = "https://image.utoimage.com/preview/cp861283/2024/09/202409012057_500.jpg"
+
+# ------------------------
+# 간단 약물 상호작용 DB (예시, 필요한 만큼 확장 가능)
+# ------------------------
+DRUG_INTERACTIONS = {
+    "warfarin": ["비타민K가 풍부한 음식(시금치 등)과 상호작용 가능 — 복용 규칙 준수 필요",
+                 "NSAIDs(예: 이부프로펜)과 함께 쓰면 출혈 위험 증가"],
+    "atorvastatin": ["그레이프프루트 주스는 혈중 농도 상승 가능 — 피하세요",
+                     "일부 항생제(macrolide)와 병용 시 부작용 증가 가능"],
+    "simvastatin": ["그레이프프루트 주스 금기", "강력한 CYP3A4 억제제와 병용 주의"],
+    "metformin": ["과도한 음주 시 젖산산증 위험 증가 — 음주 주의"],
+    "aspirin": ["다른 NSAIDs와 병용 시 출혈 위험 증가", "항응고제(와파린 등)와 병용 주의"],
+    "amlodipine": ["자몽과 상호작용 보고 있음 — 주의"],
+}
+
+def lookup_interactions(drug_name: str):
+    if not drug_name: return []
+    name = str(drug_name).lower()
+    warnings = []
+    for k,v in DRUG_INTERACTIONS.items():
+        if k in name or name in k:
+            warnings += v
+    tokens = re.split(r"[\s,/]+", name)
+    for t in tokens:
+        if t in DRUG_INTERACTIONS:
+            warnings += DRUG_INTERACTIONS[t]
+    # unique preserve order
+    return list(dict.fromkeys(warnings))
+
+# ------------------------
+# 오디오(내장 톤) - 경보용
+# ------------------------
 def make_alarm_wav(seconds=1.2, freq=880, sr=16000):
     import wave, struct
     t = np.linspace(0, seconds, int(sr*seconds), False)
@@ -40,56 +73,11 @@ def make_alarm_wav(seconds=1.2, freq=880, sr=16000):
     return buf.getvalue()
 
 ALARM_WAV = make_alarm_wav()
+ALARM_B64 = base64.b64encode(ALARM_WAV).decode()
 
-# -------------------------
-# Base64 강아지 이미지 (작은 PNG)
-# - 실제로 길어서 축약/샘플 사용; 보완 원하면 교체해드립니다.
-# -------------------------
-DOG_IMAGE_BASE64 = (
-"iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAMAAACahl6sAAAABlBMVEX///8AAABVwtN+AAABsElEQVR4nO3VMQ0AMAwAsXv/p4y"
-"YpQqk8m2M2gI8d2gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPgO6gAAANg+1mEAAACAG9gEAAABgBvYBAAAYAa9gEAAAA"
-"YAb2AQAAAGAG9gEAAABgBvYBAAAYAa9gEAAAA..."
-)  # placeholder base64; it displays an icon. Replace with full base64 for higher-res.
-
-def dog_img_html(size=220):
-    return f'<img id="nuri_dog" src="data:image/png;base64,{DOG_IMAGE_BASE64}" style="width:{size}px;height:{size}px;border-radius:12px;cursor:pointer;"/>'
-
-# -------------------------
-# 간단 내장 '약 상호작용 DB' (예시)
-# - 실제 임상 데이터가 아니며, 예시 목적임.
-# - 필요하면 항목/정밀도 확장 가능합니다.
-# -------------------------
-DRUG_INTERACTIONS = {
-    # keys lower-case; values list of warnings
-    "warfarin": ["비타민K가 풍부한 음식(시금치 등)과 상호작용 가능 — 복용 규칙 준수 필요",
-                 "NSAIDs(예: 이부프로펜)과 함께 쓰면 출혈 위험 증가"],
-    "atorvastatin": ["그레이프프루트 주스는 혈중 농도 상승 가능 — 피하세요",
-                     "몇몇 항생제(macrolides)와 병용 시 부작용 증가 가능"],
-    "simvastatin": ["그레이프프루트 주스 금기", "강력한 CYP3A4 억제제와 병용 주의"],
-    "metformin": ["과도한 음주 시 젖산산증 위험 증가 — 음주 주의"],
-    "aspirin": ["다른 NSAIDs와 병용 시 출혈 위험 증가", "항응고제(와파린 등)와 병용 주의"],
-    "amlodipine": ["자몽과 상호작용 보고 있음 — 주의"],
-    # Add more as needed...
-}
-
-def lookup_interactions(drug_name):
-    if not drug_name: return []
-    name = str(drug_name).lower()
-    warnings = []
-    for k, v in DRUG_INTERACTIONS.items():
-        if k in name or name in k:
-            warnings += v
-    # also try token match
-    tokens = re.split(r"[\s,/]+", name)
-    for t in tokens:
-        if t in DRUG_INTERACTIONS:
-            warnings += DRUG_INTERACTIONS[t]
-    # unique
-    return list(dict.fromkeys(warnings))
-
-# -------------------------
+# ------------------------
 # 유틸 함수
-# -------------------------
+# ------------------------
 def now_kst():
     return datetime.now(KST)
 
@@ -103,17 +91,21 @@ def save_csv(df, path):
     except Exception:
         pass
 
-def safe_read_csv(uploaded_or_path):
-    encs = [None, "utf-8", "cp949", "euc-kr", "latin1"]
-    if isinstance(uploaded_or_path, str):
+def read_csv_flexible(path_or_buf):
+    """한글 CSV 인코딩(utf-8-sig/CP949/EUC-KR/utf-8) 자동 시도"""
+    encs = ["utf-8-sig", "cp949", "euc-kr", "utf-8", "latin1"]
+    last_err = None
+    # path_or_buf may be path string or an uploaded buffer
+    if isinstance(path_or_buf, str):
         for e in encs:
             try:
-                return pd.read_csv(uploaded_or_path, encoding=e)
-            except Exception:
+                return pd.read_csv(path_or_buf, encoding=e)
+            except Exception as err:
+                last_err = err
                 continue
-        raise
+        raise last_err
     else:
-        raw = uploaded_or_path.read()
+        raw = path_or_buf.read()
         for e in encs:
             try:
                 return pd.read_csv(BytesIO(raw), encoding=e)
@@ -121,9 +113,12 @@ def safe_read_csv(uploaded_or_path):
                 continue
         return pd.read_csv(BytesIO(raw))
 
+def safe_read_csv(uploaded_or_path):
+    return read_csv_flexible(uploaded_or_path)
+
 def parse_time_str(tstr):
     try:
-        h, m = map(int, str(tstr).split(":"))
+        h,m = map(int, str(tstr).split(":"))
         return dtime(hour=h, minute=m)
     except Exception:
         return None
@@ -168,23 +163,145 @@ def save_contacts(lst):
     except Exception:
         pass
 
-# -------------------------
+# ------------------------
+# 체크인/시간 처리/위험도 로직 (친구 코드 기반 보존 및 개선)
+# ------------------------
+def ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        # localize naive datetimes to KST if tz-naive
+        try:
+            naive = df["timestamp"].dt.tz is None
+        except Exception:
+            naive = True
+        # try to localize only naive
+        def localize_try(ts):
+            if pd.isna(ts):
+                return pd.NaT
+            if ts.tzinfo is None:
+                try:
+                    return ts.replace(tzinfo=KST)
+                except Exception:
+                    return ts
+            return ts
+        df["timestamp"] = df["timestamp"].apply(localize_try)
+        df = df[pd.notna(df["timestamp"])]
+    return df
+
+def checkin_stats(df: pd.DataFrame, lookback_days=30):
+    df = ensure_timestamp(df.copy())
+    if df.empty:
+        return {"missing_days": [], "z_outliers_idx": [], "mean_min": None, "std_min": None}
+    df_recent = df[df["timestamp"] >= (now_kst() - timedelta(days=lookback_days))]
+    if df_recent.empty:
+        return {"missing_days": [], "z_outliers_idx": [], "mean_min": None, "std_min": None}
+    daily = (df_recent
+             .assign(date=lambda x: x["timestamp"].dt.date,
+                     minutes=lambda x: x["timestamp"].dt.hour*60 + x["timestamp"].dt.minute)
+             .sort_values("timestamp")
+             .groupby("date", as_index=False).first())
+    days = [(now_kst().date() - timedelta(days=i)) for i in range(lookback_days)]
+    existing = set(daily["date"].tolist())
+    missing = [d for d in days if d not in existing]
+    if len(daily) >= 5:
+        mins = daily["minutes"].to_numpy()
+        mu = float(np.mean(mins))
+        sd = float(np.std(mins)) if np.std(mins) > 0 else 1.0
+        zscores = (mins - mu) / sd
+        out_idx = list(np.where(np.abs(zscores) > 2)[0])
+        return {"missing_days": missing, "z_outliers_idx": out_idx, "mean_min": mu, "std_min": sd, "daily": daily}
+    return {"missing_days": missing, "z_outliers_idx": [], "mean_min": None, "std_min": None, "daily": daily}
+
+def enumerate_due_times(start_clock: dtime, interval_hours: int, from_dt: datetime, to_dt: datetime):
+    start_at = datetime.combine(from_dt.date(), start_clock, tzinfo=KST)
+    while start_at > from_dt:
+        start_at -= timedelta(hours=interval_hours)
+    while start_at + timedelta(hours=interval_hours) < from_dt:
+        start_at += timedelta(hours=interval_hours)
+    times, cur = [], start_at
+    while cur <= to_dt:
+        if cur >= from_dt: times.append(cur)
+        cur += timedelta(hours=interval_hours)
+    return times
+
+def estimate_adherence(meds_df, med_log_df, days=7, window_minutes=60):
+    to_dt = now_kst(); from_dt = to_dt - timedelta(days=days)
+    due_list = []
+    taken_list = med_log_df[(pd.to_datetime(med_log_df["taken_at"])>=from_dt) & (pd.to_datetime(med_log_df["taken_at"])<=to_dt)].copy()
+    for _, row in meds_df.iterrows():
+        name = row["name"]; iv = int(row["interval_hours"]); sc = parse_time_str(str(row["start_time"]))
+        if not sc: continue
+        for d in enumerate_due_times(sc, iv, from_dt, to_dt):
+            due_list.append({"name": name, "due_time": d})
+    due_df = pd.DataFrame(due_list)
+    if due_df.empty: return 0, 0
+    taken_on_time, window = 0, timedelta(minutes=window_minutes)
+    for _, due in due_df.iterrows():
+        name = due["name"]; dtime_ = due["due_time"]
+        cand = taken_list[(taken_list["name"]==name) & (pd.to_datetime(taken_list["taken_at"]).between(dtime_-window, dtime_+window))]
+        if len(cand):
+            taken_on_time += 1
+            taken_list = taken_list.drop(cand.index[0])
+    return len(due_df), taken_on_time
+
+def already_taken(med_log_df, name, due_time, window_minutes=60):
+    w = timedelta(minutes=window_minutes)
+    hit = med_log_df[(med_log_df["name"]==name) & (pd.to_datetime(med_log_df["taken_at"]).between(due_time-w, due_time+w))]
+    return len(hit) > 0
+
+def due_now_list(meds_df, med_log_df, within_minutes=15, overdue_minutes=90):
+    now = now_kst(); due_items = []
+    for _, row in meds_df.iterrows():
+        name = row["name"]; iv = int(row["interval_hours"]); sc = parse_time_str(str(row["start_time"]))
+        if not sc: continue
+        dues = enumerate_due_times(sc, iv, now - timedelta(days=2), now + timedelta(days=1))
+        if not dues: continue
+        closest = min(dues, key=lambda d: abs((d - now).total_seconds()))
+        diff_min = (closest - now).total_seconds()/60.0
+        status = None
+        if abs(diff_min) <= within_minutes:
+            status = "due"
+        elif diff_min < 0 and abs(diff_min) <= overdue_minutes:
+            status = "overdue"
+        if status and not already_taken(med_log_df, name, closest, window_minutes=60):
+            due_items.append({"name": name, "due_time": closest, "status": status})
+    return due_items
+
+def risk_score(checkins_df, med_log_df, meds_df):
+    cs = checkin_stats(checkins_df, lookback_days=14)
+    missing_last3 = [d for d in cs.get("missing_days", []) if (now_kst().date() - d).days <= 3]
+    n_missing3 = len(missing_last3); n_out7 = 0
+    if "daily" in cs and len(cs["daily"])>0 and cs.get("mean_min") is not None and cs.get("std_min",0)>0:
+        last7 = cs["daily"][cs["daily"]["date"] >= (now_kst().date()-timedelta(days=7))]
+        if len(last7) >= 5:
+            mins = last7["minutes"].to_numpy()
+            z = (mins - cs["mean_min"]) / cs["std_min"]
+            n_out7 = int(np.sum(np.abs(z)>2))
+    adherence = 1.0
+    if not meds_df.empty:
+        due_total, taken_on_time = estimate_adherence(meds_df, med_log_df, days=7, window_minutes=60)
+        adherence = (taken_on_time / due_total) if due_total>0 else 1.0
+    score = min(n_missing3, 3)/3*40 + min(n_out7, 5)/5*20 + (1.0 - adherence)*40
+    return round(max(0, min(100, score)), 1), {
+        "missing_last3": n_missing3, "outliers_last7": n_out7, "adherence_7d": round(adherence*100,1)
+    }
+
+# ------------------------
 # 초기 파일 생성 / 로드
-# -------------------------
+# ------------------------
 ensure_csv(CHECKIN_CSV, ["timestamp","lat","lon"])
 ensure_csv(MEDS_CSV, ["name","interval_hours","start_time","notes"])
 ensure_csv(MEDLOG_CSV, ["name","due_time","taken_at"])
 ensure_csv(INSTITUTIONS_CSV, [])
 ensure_csv(REGIONAL_CSV, [])
 
-checkins = pd.read_csv(CHECKIN_CSV)
-if "timestamp" in checkins.columns:
-    checkins["timestamp"] = pd.to_datetime(checkins["timestamp"], errors="coerce")
+checkins = pd.read_csv(CHECKIN_CSV) if os.path.exists(CHECKIN_CSV) else pd.DataFrame(columns=["timestamp","lat","lon"])
+checkins = ensure_timestamp(checkins)
 
 meds = pd.read_csv(MEDS_CSV) if os.path.exists(MEDS_CSV) else pd.DataFrame(columns=["name","interval_hours","start_time","notes"])
-med_log = pd.read_csv(MEDLOG_CSV)
+med_log = pd.read_csv(MEDLOG_CSV) if os.path.exists(MEDLOG_CSV) else pd.DataFrame(columns=["name","due_time","taken_at"])
 if "taken_at" in med_log.columns:
-    med_log["taken_at"] = pd.to_datetime(med_log["taken_at"], errors="coerce")
+    med_log["taken_at"] = pd.to_datetime(med_log["taken_at"], errors="coerce").dropna()
 
 try:
     institutions = safe_read_csv(INSTITUTIONS_CSV) if os.path.exists(INSTITUTIONS_CSV) else pd.DataFrame()
@@ -195,10 +312,10 @@ try:
 except Exception:
     regional = pd.DataFrame()
 
-# -------------------------
-# UI: 기본 설정
-# -------------------------
-st.set_page_config(page_title="🧡 독거노인 지원 (nurinuri)", layout="wide")
+# ------------------------
+# UI 기본 설정 (글자 크기)
+# ------------------------
+st.set_page_config(page_title="🧡 독거노인 지원 웹앱 (Prototype)", page_icon="🧡", layout="wide")
 font_choice = st.sidebar.selectbox("글자 크기", ["소","일반","대형","초대형"], index=1)
 _font_map = {"소":"16px","일반":"20px","대형":"24px","초대형":"30px"}
 base_font = _font_map.get(font_choice, "20px")
@@ -206,169 +323,164 @@ st.markdown(f"""
 <style>
 :root {{ --base-font: {base_font}; }}
 html, body, [class*="css"]  {{ font-size: var(--base-font); }}
-.dog-img {{ width:220px; height:220px; border-radius:16px; cursor:pointer; }}
-.dog-img:active {{ transform: scale(0.96) rotate(-4deg); }}
+button, .stButton>button {{ font-size: 1.05rem !important; padding: 0.5rem 0.9rem !important; border-radius: 10px !important; }}
+.dog-img {{ width:260px; height:260px; border-radius:14px; cursor:pointer; }}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧡 독거노인 지원 — nurinuri_not_alone")
+st.title("🧡 독거노인 지원 웹앱 (nurinuri_not_alone)")
 
-# -------------------------
-# 탭/페이지
-# -------------------------
-tabs = st.tabs(["① 체크인", "② 위험도/시나리오", "③ 복약", "④ 주변 의료기관", "⑤ 치매예방", "⑥ 연락망", "⑦ 똥강아지", "⑧ 데이터/설정"])
-tab_idx = 0
+# ------------------------
+# 탭 (5개)
+# ------------------------
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["① 체크인(강아지)","② 위험도/119 시나리오","③ 복약 스케줄러","④ 주변 의료기관 찾기","⑤ 데이터/설정"])
 
-# -------------------------
-# ① 체크인 (강아지 터치)
-# -------------------------
-with tabs[0]:
+# ------------------------
+# ① 체크인 (강아지 클릭)
+# ------------------------
+with tab1:
     st.header("① 매일 체크인 (강아지 터치)")
-    st.markdown("강아지를 터치하면 체크인되고, 위치 허용 시 위치/자리표시자 날씨를 안내합니다.")
+    st.markdown("강아지를 터치하면 체크인됩니다. (위치 허용 시 날씨를 표시합니다.)")
 
-    # HTML+JS component to get click + geolocation
+    # custom HTML component for dog image + geolocation
     dog_html = f"""
     <div style="text-align:center;">
-      {dog_img_html(220)}
-      <div style="font-size:16px;margin-top:8px;">강아지를 터치하면 체크인됩니다 🐶</div>
+      <img id="nuri_dog" src="{DOG_URL_IDLE}" class="dog-img" />
+      <div style="font-size:14px;margin-top:8px;">강아지를 터치하세요 🐶</div>
       <script>
         const send = v => window.parent.postMessage({{type:"streamlit:setComponentValue", value:v}}, "*");
         const dog = document.getElementById("nuri_dog");
         dog.onclick = () => {{
+          // visual feedback
           dog.style.transform = "scale(1.06) rotate(4deg)";
           setTimeout(()=>dog.style.transform="", 220);
+          // try geolocation
           if (navigator.geolocation) {{
             navigator.geolocation.getCurrentPosition(function(pos){{
-              send({{action:"checkin", lat: pos.coords.latitude, lon: pos.coords.longitude, ts: new Date().toISOString()}});
+              send({{action:"checkin", lat: pos.coords.latitude, lon: pos.coords.longitude, ts: new Date().toISOString(), clicked:true}});
             }}, function(err){{
-              send({{action:"checkin", lat:null, lon:null, ts: new Date().toISOString()}});
+              send({{action:"checkin", lat:null, lon:null, ts: new Date().toISOString(), clicked:true}});
             }}, {{timeout:7000}});
           }} else {{
-            send({{action:"checkin", lat:null, lon:null, ts: new Date().toISOString()}});
+            send({{action:"checkin", lat:null, lon:null, ts: new Date().toISOString(), clicked:true}});
           }}
         }};
       </script>
     </div>
     """
     from streamlit.components.v1 import html as st_html
-    res = st_html(dog_html, height=360)
+    comp_res = st_html(dog_html, height=380)
 
-    if res is not None:
-        try:
-            if isinstance(res, dict) and res.get("action") == "checkin":
-                lat = res.get("lat"); lon = res.get("lon"); ts = pd.to_datetime(res.get("ts")) if res.get("ts") else now_kst()
-                new = {"timestamp": ts, "lat": lat, "lon": lon}
-                checkins = pd.concat([checkins, pd.DataFrame([new])], ignore_index=True)
-                checkins["timestamp"] = pd.to_datetime(checkins["timestamp"], errors="coerce")
-                save_csv(checkins, CHECKIN_CSV)
-                st.success(f"체크인 완료: {ts.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S')}")
-                # 자리표시자 날씨
-                if lat is not None and lon is not None:
-                    st.info(f"위치: lat={lat:.6f}, lon={lon:.6f}")
-                    st.info("현재 날씨(자리표시자): 맑음, 15°C ☀️")
-                else:
-                    st.info("위치 미허용: 수동입력 또는 저장된 집 위치 사용 가능.")
-        except Exception as e:
-            st.error(f"체크인 처리 오류: {e}")
+    # when JS posts, streamlit's component returns the posted dict as comp_res
+    if comp_res is not None:
+        if isinstance(comp_res, dict) and comp_res.get("action") == "checkin":
+            lat = comp_res.get("lat"); lon = comp_res.get("lon")
+            ts_raw = comp_res.get("ts")
+            try:
+                ts = pd.to_datetime(ts_raw)
+                # localize if naive
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=KST)
+            except Exception:
+                ts = now_kst()
+            new = {"timestamp": ts, "lat": lat, "lon": lon}
+            checkins = pd.concat([checkins, pd.DataFrame([new])], ignore_index=True)
+            checkins["timestamp"] = pd.to_datetime(checkins["timestamp"], errors="coerce")
+            save_csv(checkins, CHECKIN_CSV)
+            # show success and weather via Open-Meteo if lat/lon present
+            st.success(f"체크인 완료: {ts.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+            if lat is not None and lon is not None:
+                # Open-Meteo API (no key) - current weather
+                try:
+                    om_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&timezone=Asia%2FSeoul"
+                    r = requests.get(om_url, timeout=6)
+                    j = r.json()
+                    cw = j.get("current_weather", {})
+                    temp = cw.get("temperature")
+                    wind = cw.get("winddirection")
+                    weather_text = f"현재 기온 {temp}°C"
+                    st.info(f"현재 위치 날씨: {weather_text}")
+                except Exception as e:
+                    st.info("날씨 정보를 가져오지 못했습니다.")
+            else:
+                st.info("위치 정보 미허용: 수동 위치 설정 또는 집 위치 사용 가능.")
 
+    # recent checkins and hourly plot
     st.markdown("---")
-    st.subheader("최근 체크인 (시간 단위)")
+    st.subheader("최근 체크인 기록 및 시간(시간 단위)")
     if not checkins.empty:
         dfc = checkins.copy()
         dfc["timestamp"] = pd.to_datetime(dfc["timestamp"], errors="coerce")
         st.dataframe(dfc.sort_values("timestamp", ascending=False).head(50), use_container_width=True)
-        # 날짜별 첫 체크인 (시간 단위)
         df_plot = (dfc.assign(date=lambda x: pd.to_datetime(x["timestamp"]).dt.date,
-                              hour=lambda x: pd.to_datetime(x["timestamp"]).dt.hour)
+                              hour_float=lambda x: pd.to_datetime(x["timestamp"]).dt.hour + pd.to_datetime(x["timestamp"]).dt.minute/60)
                         .sort_values("timestamp")
-                        .groupby("date", as_index=False).first()
+                        .groupby("date", as_index=False)["hour_float"].min()
                         .sort_values("date"))
-        st.caption("날짜별 첫 체크인 시각 (시간 단위)")
+        st.caption("날짜별 첫 체크인 시각 (시간 단위, 소수점은 분 비율)")
         if not df_plot.empty:
-            st.line_chart(df_plot.set_index("date")["hour"])
+            st.line_chart(df_plot.set_index("date")["hour_float"])
     else:
-        st.info("체크인 기록이 없습니다.")
+        st.info("아직 체크인 기록이 없습니다.")
 
-# -------------------------
-# ② 위험도 / 시나리오
-# -------------------------
-with tabs[1]:
+# ------------------------
+# ② 위험도/119 시나리오
+# ------------------------
+with tab2:
     st.header("② 위험도 예측 및 자동 알림(시뮬레이션)")
-    risk_thr = st.slider("119/보호자 연락(가상) 발동 기준(%)", 10, 100, 60, 5)
+    leftc, rightc = st.columns([1,3])
+    with leftc:
+        risk_thr = st.slider("119/보호자 연락(가상) 발동 기준(%)", 10, 100, 60, 5)
+        if st.button("🔔 테스트 알림음 재생"):
+            # play test alarm (user gesture)
+            st.markdown(f'<audio autoplay controls src="data:audio/wav;base64,{ALARM_B64}"></audio>', unsafe_allow_html=True)
+    with rightc:
+        st.info("위험도는 최근 체크인/복약 이력 기반으로 계산됩니다. 임계치 초과 시 가상 경보가 실행됩니다.")
 
-    # compute risk similar logic
-    def compute_risk(checkins_df, meds_df, med_log_df):
-        if checkins_df.empty:
-            return 0.0, {"missing_last3":0, "outliers_last7":0, "adherence_7d":100.0}
-        df = checkins_df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        recent = df[df["timestamp"] >= (now_kst() - timedelta(days=14))]
-        if recent.empty:
-            return 0.0, {"missing_last3":0, "outliers_last7":0, "adherence_7d":100.0}
-        daily = recent.assign(date=lambda x: x["timestamp"].dt.date,
-                              hour=lambda x: x["timestamp"].dt.hour).sort_values("timestamp").groupby("date", as_index=False).first()
-        days = [(now_kst().date() - timedelta(days=i)) for i in range(14)]
-        missing = [d for d in days if d not in set(daily["date"].tolist())]
-        missing_last3 = [d for d in missing if (now_kst().date() - d).days <= 3]
-        n_missing3 = len(missing_last3)
-        n_out7 = 0
-        mean_hour = None; std_hour = None
-        if len(daily) >= 5:
-            arr = daily["hour"].to_numpy()
-            mean_hour = float(np.mean(arr)); std_hour = float(np.std(arr)) if np.std(arr)>0 else 1.0
-            last7 = daily[daily["date"] >= (now_kst().date() - timedelta(days=7))]
-            if len(last7) >= 5:
-                z = (last7["hour"].to_numpy() - mean_hour) / std_hour
-                n_out7 = int(np.sum(np.abs(z) > 2))
-        # adherence
-        adherence = 1.0
-        if not meds_df.empty and "name" in meds_df.columns and not med_log_df.empty:
-            to_dt = now_kst(); from_dt = to_dt - timedelta(days=7)
-            taken = med_log_df[(pd.to_datetime(med_log_df["taken_at"]) >= from_dt) & (pd.to_datetime(med_log_df["taken_at"]) <= to_dt)]
-            due_total = max(1, len(meds_df) * 7)
-            adherence = min(1.0, len(taken)/due_total)
-        score = min(n_missing3,3)/3*40 + min(n_out7,5)/5*20 + (1.0 - adherence)*40
-        return round(max(0, min(100, score)),1), {"missing_last3": n_missing3, "outliers_last7": n_out7, "adherence_7d": round(adherence*100,1)}
-
-    score, detail = compute_risk(checkins, meds, med_log)
+    score, detail = risk_score(checkins, med_log, meds)
     st.subheader(f"현재 위험도: {score}%")
     st.progress(min(1.0, score/100.0))
-    c1, c2, c3 = st.columns(3)
+    c1,c2,c3 = st.columns(3)
     c1.metric("최근 3일 결측(일)", detail["missing_last3"])
     c2.metric("최근 7일 이상치(일)", detail["outliers_last7"])
     c3.metric("복약 준수(7일)", f"{detail['adherence_7d']}%")
 
     if score >= risk_thr:
         st.error("⚠️ 위험도 임계치 초과! (가상 경보/연락 시나리오)")
-        # play alarm (browser may block unless user gesture)
-        st.audio(ALARM_WAV)
+        # Try playing audio via autoplay HTML (may be blocked by browser)
+        st.markdown(f'<audio autoplay controls src="data:audio/wav;base64,{ALARM_B64}"></audio>', unsafe_allow_html=True)
         st.markdown("""
 **시뮬레이션: 자동 연락 절차**
 1) 보호자 1차 연락 시도  
 2) 미응답 시 119 연계 안내 음성 송출  
 3) 위치/최근 체크인/복약정보 요약 전송(가상)
 """)
+    else:
+        st.success("현재는 임계치 미만입니다.")
 
-# -------------------------
-# ③ 복약 스케줄러 / 상호작용 알림
-# -------------------------
-with tabs[2]:
+# ------------------------
+# ③ 복약 스케줄러 / 리마인더
+# ------------------------
+with tab3:
     st.header("③ 복약 스케줄러 / 리마인더")
-    st.caption("앱이 열려 있을 때만 리마인더가 화면에 표시됩니다(프로토타입).")
+    st.caption("앱이 열려 있을 때에만 리마인더가 화면에 표시됩니다(프로토타입).")
 
     with st.form("add_med", clear_on_submit=True):
-        med_name = st.text_input("약 이름 (정확히 입력하세요, 예: Warfarin)")
-        interval = st.number_input("복용 간격(시간)", 1, 48, 12, 1)
-        start_t = st.text_input("첫 복용 시각(HH:MM)", "08:00")
-        notes = st.text_input("메모(선택)")
-        if st.form_submit_button("약 추가"):
-            if med_name and parse_time_str(start_t):
-                meds = pd.concat([meds, pd.DataFrame([{"name":med_name, "interval_hours":int(interval), "start_time":start_t, "notes":notes}])], ignore_index=True)
+        st.subheader("약 추가")
+        cx, cy, cz = st.columns([2,1,2])
+        name = cx.text_input("약 이름", placeholder="예: Warfarin")
+        interval = cy.number_input("복용 간격(시간)", 1, 48, 12, 1)
+        start_t = cz.text_input("첫 복용 시각(HH:MM)", "08:00")
+        notes = st.text_input("메모(선택)", "")
+        submit = st.form_submit_button("추가")
+        if submit:
+            if name and parse_time_str(start_t):
+                meds = pd.concat([meds, pd.DataFrame([{"name": name, "interval_hours": int(interval), "start_time": start_t, "notes": notes}])], ignore_index=True)
                 save_csv(meds, MEDS_CSV)
-                st.success(f"약 추가됨: {med_name}")
+                st.success(f"약 추가됨: {name}")
                 st.experimental_rerun()
             else:
-                st.error("이름과 시각(HH:MM)을 확인하세요.")
+                st.error("입력을 확인하세요. (시각 형식 HH:MM)")
 
     if len(meds):
         st.subheader("등록된 약")
@@ -376,54 +488,33 @@ with tabs[2]:
     else:
         st.info("등록된 약이 없습니다.")
 
-    # due list
-    def enumerate_due_times(start_clock: dtime, interval_hours: int, from_dt: datetime, to_dt: datetime):
-        start_at = datetime.combine(from_dt.date(), start_clock, tzinfo=KST)
-        while start_at > from_dt:
-            start_at -= timedelta(hours=interval_hours)
-        while start_at + timedelta(hours=interval_hours) < from_dt:
-            start_at += timedelta(hours=interval_hours)
-        times, cur = [], start_at
-        while cur <= to_dt:
-            if cur >= from_dt: times.append(cur)
-            cur += timedelta(hours=interval_hours)
-        return times
-
-    now = now_kst()
-    due_items = []
-    for _, row in meds.iterrows():
-        sc = parse_time_str(str(row["start_time"]))
-        if not sc: continue
-        for d in enumerate_due_times(sc, int(row["interval_hours"]), now - timedelta(days=2), now + timedelta(days=1)):
-            taken = med_log[(med_log["name"]==row["name"]) & (pd.to_datetime(med_log["taken_at"]).between(d - timedelta(minutes=60), d + timedelta(minutes=60)))]
-            if len(taken): continue
-            diff_min = (d - now).total_seconds()/60.0
-            status = "🕒 곧 복약" if abs(diff_min) <= 15 else ("⏰ 연체" if diff_min < 0 and abs(diff_min) <= 24*60 else None)
-            if status:
-                due_items.append({"name": row["name"], "due_time": d, "status": status})
-
+    # due items
+    due_items = due_now_list(meds, med_log, within_minutes=15, overdue_minutes=90)
     st.subheader("리마인더")
     if due_items:
-        for idx, it in enumerate(due_items):
-            nm = it["name"]; due = it["due_time"].astimezone(KST).strftime("%Y-%m-%d %H:%M"); status = it["status"]
-            st.warning(f"{status}: {nm} / 예정 {due}")
-            b1, b2, _ = st.columns([1,1,3])
+        for idx, item in enumerate(due_items):
+            name_i = item["name"]; due_dt = item["due_time"]
+            due_txt = due_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+            status = "🕒 곧 복약" if item["status"]=="due" else "⏰ 연체"
+            st.warning(f"{status}: {name_i} / 예정시각 {due_txt}")
+            b1,b2,_ = st.columns([1,1,3])
             with b1:
-                if st.button(f"✅ {nm} 복용 기록", key=f"take_{idx}"):
-                    med_log = pd.concat([med_log, pd.DataFrame([{"name": nm, "due_time": it["due_time"], "taken_at": now_kst()}])], ignore_index=True)
+                if st.button(f"✅ {name_i} 복용 기록", key=f"take_{idx}"):
+                    med_log = pd.concat([med_log, pd.DataFrame([{"name": name_i, "due_time": due_dt, "taken_at": now_kst()}])], ignore_index=True)
                     save_csv(med_log, MEDLOG_CSV)
-                    st.success(f"{nm} 복용 기록 완료")  # will disappear on rerun
+                    st.success(f"{name_i} 복용 기록 완료")
                     st.experimental_rerun()
             with b2:
-                st.audio(ALARM_WAV)
-            # show interactions for this medicine
-            inters = lookup_interactions(nm)
+                # attempt to play audio (user gesture recommended)
+                st.markdown(f'<audio autoplay controls src="data:audio/wav;base64,{ALARM_B64}"></audio>', unsafe_allow_html=True)
+            # show interactions
+            inters = lookup_interactions(name_i)
             if inters:
                 st.info("복용 관련 주의사항:")
                 for w in inters:
                     st.write(f"- {w}")
     else:
-        st.success("현재 예정/연체 항목 없음")
+        st.success("현재 15분 이내 예정/연체 항목 없음")
 
     st.markdown("---")
     st.subheader("복용 기록")
@@ -432,18 +523,18 @@ with tabs[2]:
     else:
         st.info("복용 기록 없음")
 
-# -------------------------
-# ④ 주변 의료기관 (전국 지원)
-# - CSV 업로드 시 다양한 인코딩 지원. lat/lon 컬럼 판단
-# -------------------------
-with tabs[3]:
-    st.header("④ 주변 약국/병원 찾기 (전국 지원)")
-    st.markdown("CSV 업로드하면 lat/lon 컬럼 기반으로 근처 기관을 추천합니다. (공공데이터 포맷 호환)")
+# ------------------------
+# ④ 주변 의료기관 찾기 및 추천 (전국 지원)
+# ------------------------
+with tab4:
+    st.header("④ 주변 약국/병원 찾기 및 추천 (전국 CSV 지원)")
+    st.caption("전국 의료기관 CSV를 업로드하면 lat/lon 컬럼을 찾아 반경 내 기관을 추천합니다.")
 
-    inst_file = st.file_uploader("의료기관 CSV 업로드 (전국)", type=["csv"])
+    inst_file = st.file_uploader("전국 의료기관 표준데이터 CSV 업로드", type=["csv"])
     if inst_file is not None:
         try:
             raw = safe_read_csv(inst_file)
+            # normalize columns
             lat_col = None; lon_col = None
             for c in raw.columns:
                 lc = c.lower()
@@ -452,7 +543,7 @@ with tabs[3]:
             if lat_col and lon_col:
                 raw = raw.rename(columns={lat_col:"lat", lon_col:"lon"})
                 raw["lat"] = pd.to_numeric(raw["lat"], errors="coerce"); raw["lon"] = pd.to_numeric(raw["lon"], errors="coerce")
-                # find name column
+                # name col
                 name_col = None
                 for c in raw.columns:
                     if any(k in c.lower() for k in ["명","name","기관","병원","약국"]):
@@ -462,23 +553,30 @@ with tabs[3]:
                     raw["type"] = "병원"
                 institutions = raw[[c for c in ["name","type","lat","lon","address"] if c in raw.columns]].copy()
                 save_csv(institutions, INSTITUTIONS_CSV)
-                st.success(f"기관 데이터 저장: {len(institutions)}개")
+                st.success(f"업로드 완료: {len(institutions)}개 기관 저장")
             else:
                 st.error("CSV에서 위도(lat)/경도(lon) 컬럼을 찾을 수 없습니다.")
         except Exception as e:
             st.error(f"파일 읽기 오류: {e}")
 
-    st.markdown("직접 위치 입력 또는 저장된 집 위치 사용")
+    # home location usage
+    st.subheader("검색 위치 설정")
     home = load_home()
     use_home = st.checkbox("저장된 집 위치 사용", value=(home is not None))
-    if use_home and home:
+    if use_home and home is not None:
         lat = float(home["lat"]); lon = float(home["lon"])
-        st.success(f"집 위치: {home.get('label','우리 집')} ({lat:.6f}, {lon:.6f})")
+        st.success(f"집 위치: {home['label']} ({lat:.6f}, {lon:.6f})")
+        if st.button("집 위치 삭제"):
+            try:
+                os.remove(HOME_JSON)
+            except Exception:
+                pass
+            st.experimental_rerun()
     else:
         lat = st.number_input("위도(lat)", value=37.5665, format="%.6f")
         lon = st.number_input("경도(lon)", value=126.9780, format="%.6f")
         if st.button("이 위치를 집으로 저장"):
-            if save_home(lat, lon):
+            if save_home(lat, lon, "우리 집"):
                 st.success("집 위치 저장됨")
                 st.experimental_rerun()
 
@@ -503,186 +601,47 @@ with tabs[3]:
         else:
             st.info("반경 내 결과 없음.")
     else:
-        st.info("기관 데이터가 없습니다. CSV 업로드 후 시도하세요.")
+        st.info("의료기관 데이터가 없습니다. CSV 업로드 후 시도하세요.")
 
-# -------------------------
-# ⑤ 치매 예방
-# -------------------------
-with tabs[4]:
-    st.header("⑤ 치매 예방 간단 퀴즈")
-    if "dementia_wrong" not in st.session_state:
-        st.session_state["dementia_wrong"] = 0
-
-    name_input = st.text_input("이름 (퀴즈용)")
-    with st.form("quiz"):
-        q1 = st.text_input("오늘 날짜는? (YYYY-MM-DD)")
-        q2 = st.text_input("오늘 요일은? (예: 월요일)")
-        q3 = st.text_input("당신의 성함은?")
-        if st.form_submit_button("제출"):
-            wrong = 0
-            if q1.strip() != now_kst().date().strftime("%Y-%m-%d"): wrong += 1
-            if q2.strip() not in ["월요일","화요일","수요일","목요일","금요일","토요일","일요일"]: wrong += 1
-            if name_input and q3.strip() != name_input.strip(): wrong += 1
-            if wrong > 0:
-                st.session_state["dementia_wrong"] += 1
-                st.warning(f"{wrong}문제 틀렸습니다.")
-            else:
-                st.success("정답입니다!"); st.session_state["dementia_wrong"] = 0
-            if st.session_state["dementia_wrong"] >= 3:
-                st.markdown("<span style='color:darkorange;font-weight:bold;'>치매가 의심됩니다. 가까운 병원을 추천해드릴게요.</span>", unsafe_allow_html=True)
-                home = load_home()
-                if home and not institutions.empty and {"lat","lon"}.issubset(institutions.columns):
-                    dfh = institutions.copy()
-                    dfh["distance_km"] = haversine_km(home["lat"], home["lon"], dfh["lat"].astype(float), dfh["lon"].astype(float))
-                    top3 = dfh[dfh["type"].str.contains("병원", na=False)].sort_values("distance_km").head(3)
-                    if len(top3):
-                        st.dataframe(top3[["name","address","distance_km"]])
-                    else:
-                        st.info("근처 병원 데이터가 부족합니다.")
-                else:
-                    st.info("집 위치 또는 기관 데이터가 없어 추천 제공 불가.")
-
-    st.markdown("---")
-    st.info("간단 퍼즐은 자리표시자입니다. 필요하면 실제 게임 로직 추가해 드립니다.")
-
-# -------------------------
-# ⑥ 연락망
-# -------------------------
-with tabs[5]:
-    st.header("⑥ 연락망 (자녀/지인)")
-    contacts = load_contacts()
-    with st.form("add_contact", clear_on_submit=True):
-        nm = st.text_input("이름"); phone = st.text_input("전화번호")
-        if st.form_submit_button("추가"):
-            if nm and phone:
-                contacts.append({"name":nm,"phone":phone}); save_contacts(contacts)
-                st.success("연락처 추가"); st.experimental_rerun()
-            else:
-                st.error("이름/전화번호를 입력하세요.")
-    if contacts:
-        st.dataframe(pd.DataFrame(contacts), use_container_width=True)
-    else:
-        st.info("저장된 연락처가 없습니다.")
-
-# -------------------------
-# ⑦ 똥강아지 말동무 (Web Speech API)
-# -------------------------
-with tabs[6]:
-    st.header("⑦ 똥강아지 — 말동무 (음성 & 텍스트)")
-    st.markdown("음성은 브라우저 Web Speech API를 사용합니다. Chrome 권장.")
-
-    if "dog_chat" not in st.session_state:
-        st.session_state["dog_chat"] = []
-
-    mode = st.radio("", ["키보드(텍스트)", "음성(브라우저)"], horizontal=True)
-
-    if mode.startswith("키보드"):
-        txt = st.text_input("메시지 입력", key="dog_input")
-        if st.button("전송", key="dog_send") and txt:
-            st.session_state["dog_chat"].append({"who":"user","text":txt})
-            if any(k in txt for k in ["안녕","하이","안녕하세요"]):
-                reply = "안녕하세요! 오늘 기분은 어떠신가요?"
-            elif any(k in txt for k in ["심심","외로워","힘들"]):
-                reply = "제가 이야기 상대가 되어드릴게요. 어떤 얘기부터 할까요?"
-            else:
-                reply = "천천히 말씀해 주세요. 저는 듣고 있어요."
-            st.session_state["dog_chat"].append({"who":"bot","text":reply})
-            st.experimental_rerun()
-    else:
-        speech_html = """
-        <div style="text-align:center;">
-          <button id="start" style="font-size:18px;padding:8px 12px;">🎤 말하기 시작</button>
-          <button id="stop" style="font-size:18px;padding:8px 12px;margin-left:8px;">⏹ 중지</button>
-          <div id="status" style="margin-top:10px;"></div>
-        </div>
-        <script>
-          const send = v => window.parent.postMessage({type:"streamlit:setComponentValue", value:v}, "*");
-          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-          if (!SpeechRecognition) {
-            document.getElementById('status').innerText = '음성 인식을 지원하지 않는 브라우저입니다. (Chrome 권장)';
-          } else {
-            const rec = new SpeechRecognition(); rec.lang='ko-KR'; rec.continuous=false; rec.interimResults=false;
-            document.getElementById('start').onclick = () => { try{ rec.start(); document.getElementById('status').innerText='듣는 중...'; }catch(e){document.getElementById('status').innerText=e;} };
-            document.getElementById('stop').onclick = () => { try{ rec.stop(); document.getElementById('status').innerText='중지'; }catch(e){document.getElementById('status').innerText=e;} };
-            rec.onresult = (ev) => {
-              const txt = ev.results[0][0].transcript;
-              document.getElementById('status').innerText = '인식: ' + txt;
-              send({action:'voice_text', text: txt});
-            };
-            rec.onerror = (e) => { document.getElementById('status').innerText = '인식 오류: ' + e.error; send({action:'voice_err', text: e.error});};
-          }
-        </script>
-        """
-        from streamlit.components.v1 import html as st_html
-        v = st_html(speech_html, height=220)
-        if v is not None and isinstance(v, dict) and v.get("action") == "voice_text":
-            user_msg = v.get("text","")
-            st.session_state["dog_chat"].append({"who":"user","text":user_msg})
-            if any(k in user_msg for k in ["안녕","하이","반가워"]):
-                bot = "안녕하세요! 만나서 반가워요."
-            elif any(k in user_msg for k in ["심심","외로","외로워"]):
-                bot = "저랑 이야기해주셔서 고마워요. 같이 있어줄게요."
-            else:
-                bot = "응응, 더 말씀해 주세요."
-            st.session_state["dog_chat"].append({"who":"bot","text":bot})
-            # use browser TTS
-            tts_html = f"<script>const u=new SpeechSynthesisUtterance({json.dumps(bot)});u.lang='ko-KR';window.speechSynthesis.cancel();window.speechSynthesis.speak(u);</script>"
-            st_html(tts_html, height=1)
-
-    st.markdown("---")
-    st.subheader("대화 기록")
-    for m in st.session_state["dog_chat"][-60:]:
-        if m["who"] == "user":
-            st.markdown(f"**사용자:** {m['text']}")
-        else:
-            st.markdown(f"**똥강아지:** {m['text']}")
-
-# -------------------------
-# ⑧ 데이터 / 설정
-# -------------------------
-with tabs[7]:
-    st.header("⑧ 데이터/설정 (다운로드/업로드)")
-    c1,c2,c3 = st.columns(3)
+# ------------------------
+# ⑤ 데이터/설정 (다운로드/업로드 + 위험도 점수식 설명)
+# ------------------------
+with tab5:
+    st.header("⑤ 데이터/설정 (자료 관리)")
+    c1,c2,c3,c4 = st.columns(4)
     with c1:
         st.download_button("체크인 CSV", data=checkins.to_csv(index=False).encode("utf-8"), file_name="checkins.csv")
     with c2:
         st.download_button("약 목록 CSV", data=meds.to_csv(index=False).encode("utf-8"), file_name="meds.csv")
     with c3:
         st.download_button("복약 기록 CSV", data=med_log.to_csv(index=False).encode("utf-8"), file_name="med_log.csv")
+    with c4:
+        if not institutions.empty:
+            st.download_button("의료기관 CSV", data=institutions.to_csv(index=False).encode("utf-8"), file_name="institutions.csv")
+        else:
+            st.write("의료기관 CSV: (없음)")
 
     st.markdown("---")
-    st.markdown("의료기관/지역 데이터 업로드 (전국 CSV 권장)")
-    inst_up = st.file_uploader("의료기관 CSV 업로드 (전국, lat/lon 포함)", type=["csv"])
-    if inst_up is not None:
-        try:
-            df_inst = safe_read_csv(inst_up)
-            df_inst.to_csv(INSTITUTIONS_CSV, index=False)
-            st.success("업로드 및 저장 완료")
-        except Exception as e:
-            st.error(f"업로드 실패: {e}")
-
-    reg_up = st.file_uploader("지역요인 파일(xlsx/csv)", type=["xlsx","csv"])
-    if reg_up is not None:
-        try:
-            if reg_up.name.lower().endswith(".xlsx"):
-                r = pd.read_excel(reg_up, engine="openpyxl")
-            else:
-                r = safe_read_csv(reg_up)
-            r.to_csv(REGIONAL_CSV, index=False)
-            st.success("저장됨")
-        except Exception as e:
-            st.error(f"업로드 실패: {e}")
-
-    st.markdown("---")
-    st.info("앱 상태 미리보기")
+    st.markdown("#### 자동 로드 상태 미리보기")
+    if os.path.exists("/mnt/data/전국의료기관 표준데이터.csv") or os.path.exists("전국의료기관 표준데이터.csv"):
+        st.success("전국의료기관 원본 감지됨(자동 변환 가능)")
     if not institutions.empty:
-        st.dataframe(institutions.head(5))
+        st.dataframe(institutions.head(10), use_container_width=True)
     else:
         st.info("의료기관 데이터 없음")
 
-# -------------------------
-# 앱 종료 시 저장
-# -------------------------
+    st.markdown("#### 위험도 계산식(요약)")
+    st.code("""
+# score = 0
+# score += min(n_missing3, 3) / 3 * 40      # 최근 3일 결측
+# score += min(n_out7, 5) / 5 * 20          # 최근 7일 이상치(체크인 시각)
+# score += (1.0 - adherence) * 40           # 7일 복약 준수율 역가중
+# => 0~100 점수
+""", language="python")
+
+# ------------------------
+# 상태 저장 (앱 종료시)
+# ------------------------
 try:
     save_csv(checkins, CHECKIN_CSV)
     save_csv(meds, MEDS_CSV)
