@@ -2,16 +2,18 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests, io, re
+from sklearn.neighbors import BallTree
+import numpy as np
 
 st.set_page_config(page_title="독거노인 대비 의료 접근성 분석", layout="wide")
-st.title("🏥 독거노인 인구 대비 의료 접근성 분석")
+st.title("🏥 독거노인 인구 대비 의료 접근성 분석 (보로노이 기반)")
 
 st.markdown("""
-이 앱은 **시군구 단위**로 독거노인 비율 대비 의료기관 수를 비교하여  
-접근성을 시각적으로 보여줍니다.
+이 앱은 **시군구 단위**로 독거노인 비율 대비 **의료 접근성**을  
+보로노이 계산식(거리 기반 가중치)을 이용해 시각화합니다.
 
-- 🟥 **의료기관 부족 지역**  
-- 🟩 **의료기관 풍부 지역**
+- 🟥 **의료기관 접근성 낮음**  
+- 🟩 **의료기관 접근성 높음**
 """)
 
 # -----------------------------
@@ -48,18 +50,18 @@ df_facility = read_any(facility_file)
 if df_elder is not None and df_facility is not None:
     st.success("✅ 두 파일 모두 업로드 완료!")
 
-    # 🔹 컬럼명 전처리 (괄호, 공백 제거)
+    # 컬럼명 정규화
     df_elder.columns = [re.sub(r"[\s\(\)%]+", "", c) for c in df_elder.columns]
     df_facility.columns = [re.sub(r"[\s\(\)%]+", "", c) for c in df_facility.columns]
 
-    # 🔹 독거노인 지역 컬럼 탐색
+    # 🔹 지역 컬럼 찾기
     region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군", "구", "행정"])]
     if len(region_cols) >= 2:
         df_elder["지역"] = df_elder[region_cols[0]].astype(str) + " " + df_elder[region_cols[1]].astype(str)
     else:
         df_elder["지역"] = df_elder[region_cols[0]].astype(str)
 
-    # 🔹 독거노인 관련 컬럼 탐색 (없으면 사용자에게 선택)
+    # 🔹 독거노인 관련 컬럼
     elder_val_cols = [c for c in df_elder.columns if any(k in c for k in ["독거", "노인", "가구비율", "65세", "1인가구", "인구", "비율"])]
     if len(elder_val_cols) == 0:
         st.warning("⚠️ 독거노인 관련 컬럼을 자동으로 찾지 못했습니다. 직접 선택해주세요.")
@@ -85,16 +87,9 @@ if df_elder is not None and df_facility is not None:
 
     df_facility["지역"] = df_facility[addr_col].apply(extract_region)
 
-    # 🔹 의료기관 수 계산
-    df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관수")
-
-    # 🔹 병합
-    df = pd.merge(df_elder[["지역", target_col]], df_facility_grouped, on="지역", how="left").fillna(0)
-
-    # 접근성 점수 계산
-    df["의료기관비율"] = df["의료기관수"] / (df[target_col] + 1e-6)
-
-    # 🔹 지역 정제 (충북 누락 방지)
+    # -----------------------------
+    # 🧭 지역 정규화
+    # -----------------------------
     def normalize_region(name):
         name = str(name)
         mapping = {
@@ -110,32 +105,52 @@ if df_elder is not None and df_facility is not None:
                 return name.replace(k, v)
         return name
 
-    df["지역"] = df["지역"].apply(normalize_region)
+    df_elder["지역"] = df_elder["지역"].apply(normalize_region)
+    df_facility["지역"] = df_facility["지역"].apply(normalize_region)
 
-    st.subheader("📈 병합 결과")
-    st.dataframe(df.head())
+    # -----------------------------
+    # 📍 병원 접근성 계산 (보로노이 대체)
+    # -----------------------------
+    # 위경도 대체용 행정구 중심 데이터 불러오기
+    geo_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
+    geojson = requests.get(geo_url).json()
+
+    centers = []
+    for feat in geojson["features"]:
+        name = feat["properties"]["name"]
+        coords = np.mean(np.array(feat["geometry"]["coordinates"][0][0]), axis=0)
+        centers.append([name, coords[0], coords[1]])
+    df_centers = pd.DataFrame(centers, columns=["지역", "lon", "lat"])
+
+    # 병원 지역별 중심 좌표
+    df_facility_geo = pd.merge(df_facility, df_centers, on="지역", how="left").dropna(subset=["lat"])
+    df_elder_geo = pd.merge(df_elder, df_centers, on="지역", how="left").dropna(subset=["lat"])
+
+    # 거리 기반 접근성 점수 (보로노이 근사)
+    tree = BallTree(np.radians(df_facility_geo[["lat", "lon"]]), metric="haversine")
+    dist, _ = tree.query(np.radians(df_elder_geo[["lat", "lon"]]), k=5)  # 가까운 병원 5개
+
+    # 접근성 점수 = 1 / 평균거리
+    df_elder_geo["접근성점수"] = 1 / (dist.mean(axis=1) + 1e-6)
+    df_elder_geo["의료기관접근성지수"] = df_elder_geo["접근성점수"] / (df_elder_geo[target_col] + 1e-6)
 
     # -----------------------------
     # 🗺️ 지도 시각화
     # -----------------------------
-    geo_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
-    geojson = requests.get(geo_url).json()
-
-    geo_names = [g["properties"]["name"] for g in geojson["features"]]
-    df["지역_매칭"] = df["지역"].apply(lambda x: next((n for n in geo_names if n in x), None))
-
     fig = px.choropleth(
-        df.dropna(subset=["지역_매칭"]),
+        df_elder_geo,
         geojson=geojson,
-        locations="지역_매칭",
+        locations="지역",
         featureidkey="properties.name",
-        color="의료기관비율",
+        color="의료기관접근성지수",
         color_continuous_scale="RdYlGn",
-        title="시군구별 독거노인 대비 의료기관 접근성",
+        title="시군구별 독거노인 대비 의료 접근성 (보로노이 기반)"
     )
 
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="#f5f5f5")
     st.plotly_chart(fig, use_container_width=True)
+
+    st.caption("※ 거리 기반 보로노이 근사 계산: 시군구 중심점 간 거리로 접근성 점수를 계산함")
 
 else:
     st.info("👆 사이드바에서 두 개의 파일을 업로드해주세요.")
