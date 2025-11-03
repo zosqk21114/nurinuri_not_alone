@@ -68,8 +68,8 @@ if df_elder is not None and df_facility is not None:
     # -----------------------------
     # 🧹 데이터 전처리
     # -----------------------------
-    df_elder["지역"] = df_elder[elder_region].astype(str).str[:2]
-    df_facility["지역"] = df_facility[facility_region].astype(str).str[:2]
+    df_elder["지역"] = df_elder[elder_region].astype(str)
+    df_facility["지역"] = df_facility[facility_region].astype(str)
 
     # -----------------------------
     # 🧭 지역명 자동 변환 (GeoJSON 매칭 보정)
@@ -92,10 +92,11 @@ if df_elder is not None and df_facility is not None:
             "전북": "전라북도",
             "전남": "전라남도",
             "경북": "경상북도",
+            "경상북": "경상북도",
             "경남": "경상남도",
+            "경상남": "경상남도",
             "제주": "제주특별자치도"
         }
-        # 약칭 매칭
         for key, val in mapping.items():
             if name.startswith(key):
                 return val
@@ -109,7 +110,7 @@ if df_elder is not None and df_facility is not None:
     # -----------------------------
     df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관_수")
 
-    # 독거노인 인구 컬럼 자동 탐색
+    # 독거노인 인구 컬럼 탐색
     target_col = None
     for c in df_elder.columns:
         if "독거" in c and ("비율" in c or "인구" in c):
