@@ -156,4 +156,3 @@ if df_elder is not None and df_facility is not None:
 
 else:
     st.info("👆 사이드바에서 두 개의 파일을 모두 업로드해주세요.")
-
