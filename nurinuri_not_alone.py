@@ -10,10 +10,10 @@ st.set_page_config(page_title="독거노인 대비 의료 접근성 분석", lay
 st.title("🏥 시·군·구 단위 독거노인 대비 의료 접근성 분석 (보로노이 개념 기반)")
 
 st.markdown("""
-이 앱은 **독거노인 관련 인구**와 **의료기관 분포**를 결합해  
-보로노이 개념 기반으로 **의료 접근성 점수**를 시군구 단위로 시각화합니다.  
+이 앱은 **독거노인 관련 인구 데이터**와 **의료기관 분포 데이터**를 결합하여  
+보로노이 개념을 기반으로 한 **의료 접근성 점수**를 시군구 단위로 시각화합니다.  
 
-- 🟥 **빨간색**: 의료 접근성이 낮음 (의료기관이 부족함)  
+- 🟥 **빨간색**: 의료 접근성이 낮음 (의료기관 부족)  
 - 🟩 **초록색**: 의료 접근성이 높음 (의료기관이 충분함)
 """)
 
@@ -55,39 +55,27 @@ if df_elder is not None and df_facility is not None:
     # -----------------------------
     # 🔠 지역명 정제 함수
     # -----------------------------
-    def normalize_region(name):
+    def clean_region_name(name):
+        """시군구 매칭을 위한 정제"""
         name = str(name)
-        name = re.sub(r'\(.*?\)', '', name)  # 괄호 제거
-        name = re.sub(r'[^가-힣]', '', name)  # 한글 외 문자 제거
-        mapping = {
-            "서울": "서울특별시", "부산": "부산광역시", "대구": "대구광역시",
-            "인천": "인천광역시", "광주": "광주광역시", "대전": "대전광역시",
-            "울산": "울산광역시", "세종": "세종특별자치시", "경기": "경기도",
-            "강원": "강원특별자치도", "충북": "충청북도", "충남": "충청남도",
-            "전북": "전북특별자치도", "전남": "전라남도",
-            "경북": "경상북도", "경남": "경상남도", "제주": "제주특별자치도"
-        }
-        for key, val in mapping.items():
-            if name.startswith(key):
-                return val
-        for key, val in mapping.items():
-            if key in name:
-                return val
-        return name
+        name = re.sub(r'\(.*?\)', '', name)
+        name = re.sub(r'[^가-힣\s]', '', name)
+        name = name.replace(" ", "")
+        return name.strip()
 
     # -----------------------------
     # 👵 독거노인 데이터 전처리
     # -----------------------------
-    elder_region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군구", "행정", "지역"])]
-    elder_region = elder_region_cols[0] if elder_region_cols else st.selectbox("독거노인 지역 컬럼 선택", df_elder.columns)
+    region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군구", "행정", "지역"])]
+    region_col = region_cols[-1] if region_cols else st.selectbox("독거노인 지역 컬럼 선택", df_elder.columns)
 
-    df_elder["지역"] = df_elder[elder_region].astype(str).apply(normalize_region)
+    df_elder["지역"] = df_elder[region_col].astype(str).apply(clean_region_name)
 
     # 독거노인 관련 컬럼 탐색 (지역 컬럼 제외)
     elder_candidates = [
         c for c in df_elder.columns
         if any(k in c for k in ["독거", "1인가구", "노인", "고령", "65세", "비율", "인구"])
-        and "지역" not in c and "시도" not in c and "시군구" not in c
+        and not any(k in c for k in ["시도", "시군구", "지역"])
     ]
 
     if elder_candidates:
@@ -102,9 +90,9 @@ if df_elder is not None and df_facility is not None:
     # 🏥 의료기관 데이터 전처리
     # -----------------------------
     fac_region_cols = [c for c in df_facility.columns if any(k in c for k in ["주소", "지역", "시도", "시군구"])]
-    fac_region = fac_region_cols[0] if fac_region_cols else st.selectbox("의료기관 지역 컬럼 선택", df_facility.columns)
+    fac_region_col = fac_region_cols[0] if fac_region_cols else st.selectbox("의료기관 지역 컬럼 선택", df_facility.columns)
 
-    df_facility["지역"] = df_facility[fac_region].astype(str).apply(normalize_region)
+    df_facility["지역"] = df_facility[fac_region_col].astype(str).apply(clean_region_name)
 
     # -----------------------------
     # 🧮 시군구 단위로 그룹화
@@ -131,15 +119,25 @@ if df_elder is not None and df_facility is not None:
     geojson_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
     geojson = requests.get(geojson_url).json()
 
+    # geojson의 지역명 정리
+    geo_names = [re.sub(r'[^가-힣]', '', g["properties"]["name"]) for g in geojson["features"]]
+
+    # 데이터 매칭 보정
+    df["지역_매칭"] = df["지역"].apply(
+        lambda x: next((g for g in geo_names if g in x or x in g), None)
+    )
+
+    df_map = df.dropna(subset=["지역_매칭"])
+
     fig = px.choropleth(
-        df,
+        df_map,
         geojson=geojson,
-        locations="지역",
+        locations="지역_매칭",
         featureidkey="properties.name",
         color="의료_접근성_점수",
         color_continuous_scale="RdYlGn",
         title="시·군·구별 독거노인 대비 의료 접근성 점수 (보로노이 개념 기반)",
-        range_color=(df["의료_접근성_점수"].min(), df["의료_접근성_점수"].max())
+        range_color=(df_map["의료_접근성_점수"].min(), df_map["의료_접근성_점수"].max())
     )
 
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="#f5f5f5")
