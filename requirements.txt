@@ -1,5 +1,5 @@
 streamlit
-pandas 
-plotly-express 
-requests 
-openpyxl  
+pandas
+plotly
+requests
+openpyxl
