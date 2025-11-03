@@ -1,147 +1,136 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import io
-import requests
-import numpy as np
-import re
+import requests, io, re
 
 st.set_page_config(page_title="독거노인 대비 의료 접근성 분석", layout="wide")
-st.title("🏥 시·군·구 단위 독거노인 대비 의료 접근성 분석 (보로노이 개념 기반)")
+st.title("🏥 독거노인 인구 대비 의료 접근성 분석")
 
 st.markdown("""
-이 앱은 **독거노인 관련 인구 데이터**와 **의료기관 분포 데이터**를 결합하여  
-보로노이 개념을 기반으로 한 **의료 접근성 점수**를 시군구 단위로 시각화합니다.  
+이 앱은 **시군구 단위**로 독거노인 비율 대비 의료기관 수를 비교하여  
+접근성을 시각적으로 보여줍니다.
 
-- 🟥 **빨간색**: 의료 접근성이 낮음 (의료기관 부족)  
-- 🟩 **초록색**: 의료 접근성이 높음 (의료기관이 충분함)
+- 🟥 **의료기관 부족 지역**  
+- 🟩 **의료기관 풍부 지역**
 """)
 
 # -----------------------------
-# 📂 파일 업로드
+# 📁 파일 업로드
 # -----------------------------
-st.sidebar.header("📁 데이터 업로드")
-elder_file = st.sidebar.file_uploader("독거노인 인구 파일 (CSV 또는 XLSX)", type=["csv", "xlsx"])
-facility_file = st.sidebar.file_uploader("의료기관 데이터 파일 (CSV 또는 XLSX)", type=["csv", "xlsx"])
+st.sidebar.header("📂 데이터 업로드")
+elder_file = st.sidebar.file_uploader("독거노인 인구 파일", type=["csv", "xlsx"])
+facility_file = st.sidebar.file_uploader("의료기관 데이터 파일", type=["csv", "xlsx"])
 
 # -----------------------------
-# 🔍 파일 읽기 함수
+# 🔍 안전한 파일 읽기 함수
 # -----------------------------
 def read_any(file):
     if file is None:
         return None
     try:
-        if file.name.endswith(".csv"):
-            raw = file.read()
+        if file.name.lower().endswith(".csv") or file.name.lower().endswith(".csv.csv"):
             try:
-                return pd.read_csv(io.BytesIO(raw), encoding="utf-8")
-            except UnicodeDecodeError:
-                return pd.read_csv(io.BytesIO(raw), encoding="cp949")
-        elif file.name.endswith(".xlsx"):
+                return pd.read_csv(file, encoding="utf-8")
+            except:
+                return pd.read_csv(file, encoding="cp949")
+        elif file.name.lower().endswith(".xlsx") or file.name.lower().endswith(".xlsx.xlsx"):
             return pd.read_excel(file)
     except Exception as e:
         st.error(f"파일 읽기 오류: {e}")
         return None
 
-# -----------------------------
-# 📊 파일 로드
-# -----------------------------
 df_elder = read_any(elder_file)
 df_facility = read_any(facility_file)
 
+# -----------------------------
+# 데이터 전처리
+# -----------------------------
 if df_elder is not None and df_facility is not None:
     st.success("✅ 두 파일 모두 업로드 완료!")
 
-    # -----------------------------
-    # 🔠 지역명 정제 함수
-    # -----------------------------
-    def clean_region_name(name):
-        """시군구 매칭을 위한 정제"""
-        name = str(name)
-        name = re.sub(r'\(.*?\)', '', name)
-        name = re.sub(r'[^가-힣\s]', '', name)
-        name = name.replace(" ", "")
-        return name.strip()
+    # 🔹 독거노인 데이터
+    df_elder.columns = [c.strip() for c in df_elder.columns]
+    region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군", "구", "행정"])]
+    elder_val_cols = [c for c in df_elder.columns if any(k in c for k in ["독거", "노인", "비율", "인구"])]
 
-    # -----------------------------
-    # 👵 독거노인 데이터 전처리
-    # -----------------------------
-    region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군구", "행정", "지역"])]
-    region_col = region_cols[-1] if region_cols else st.selectbox("독거노인 지역 컬럼 선택", df_elder.columns)
-
-    df_elder["지역"] = df_elder[region_col].astype(str).apply(clean_region_name)
-
-    # 독거노인 관련 컬럼 탐색 (지역 컬럼 제외)
-    elder_candidates = [
-        c for c in df_elder.columns
-        if any(k in c for k in ["독거", "1인가구", "노인", "고령", "65세", "비율", "인구"])
-        and not any(k in c for k in ["시도", "시군구", "지역"])
-    ]
-
-    if elder_candidates:
-        target_col = st.selectbox("📊 독거노인 관련 인구(또는 비율) 컬럼 선택", elder_candidates)
+    # 시도 + 시군구 결합
+    if len(region_cols) >= 2:
+        df_elder["지역"] = df_elder[region_cols[0]].astype(str) + " " + df_elder[region_cols[1]].astype(str)
     else:
-        st.warning("🔍 자동 탐색 실패 — 직접 선택해주세요.")
-        target_col = st.selectbox("📊 독거노인 관련 인구 컬럼 (직접 선택)", [c for c in df_elder.columns if c not in ["지역"]])
+        df_elder["지역"] = df_elder[region_cols[0]].astype(str)
 
+    # 독거노인 관련 컬럼 자동 선택
+    target_col = elder_val_cols[0]
     df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors="coerce").fillna(0)
 
-    # -----------------------------
-    # 🏥 의료기관 데이터 전처리
-    # -----------------------------
-    fac_region_cols = [c for c in df_facility.columns if any(k in c for k in ["주소", "지역", "시도", "시군구"])]
-    fac_region_col = fac_region_cols[0] if fac_region_cols else st.selectbox("의료기관 지역 컬럼 선택", df_facility.columns)
+    # 🔹 의료기관 데이터
+    df_facility.columns = [c.strip() for c in df_facility.columns]
+    addr_col = [c for c in df_facility.columns if any(k in c for k in ["주소", "소재지", "시도명", "시군구명"])]
+    addr_col = addr_col[0]
 
-    df_facility["지역"] = df_facility[fac_region_col].astype(str).apply(clean_region_name)
+    def extract_region(addr):
+        addr = str(addr)
+        addr = re.sub(r"\(.*?\)", "", addr)
+        addr = re.sub(r"[^가-힣\s]", "", addr)
+        parts = addr.split()
+        if len(parts) >= 2:
+            return parts[0] + " " + parts[1]
+        return parts[0] if parts else None
 
-    # -----------------------------
-    # 🧮 시군구 단위로 그룹화
-    # -----------------------------
-    df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관_수")
+    df_facility["지역"] = df_facility[addr_col].apply(extract_region)
 
-    # -----------------------------
-    # 🔗 병합
-    # -----------------------------
-    df = pd.merge(df_elder, df_facility_grouped, on="지역", how="inner")
+    # 🔹 의료기관 수 계산
+    df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관수")
 
-    # -----------------------------
-    # 📏 보로노이 개념 기반 접근성 점수 계산
-    # -----------------------------
-    df["의료기관_비율"] = df["의료기관_수"] / (df[target_col].replace(0, 1))
-    df["의료_접근성_점수"] = np.log1p(df["의료기관_비율"]) * 100
+    # 🔹 병합
+    df = pd.merge(df_elder[["지역", target_col]], df_facility_grouped, on="지역", how="left").fillna(0)
 
-    st.subheader("📈 분석 결과 (시·군·구 단위)")
-    st.dataframe(df[["지역", target_col, "의료기관_수", "의료_접근성_점수"]])
+    # 접근성 점수 계산
+    df["의료기관비율"] = df["의료기관수"] / (df[target_col] + 1e-6)
+
+    # 🔹 지역 정제 (충북 누락 방지)
+    def normalize_region(name):
+        name = str(name)
+        mapping = {
+            "충북": "충청북도", "충남": "충청남도",
+            "경북": "경상북도", "경남": "경상남도",
+            "전북": "전라북도", "전남": "전라남도",
+            "서울": "서울특별시", "부산": "부산광역시", "대전": "대전광역시",
+            "대구": "대구광역시", "광주": "광주광역시", "인천": "인천광역시",
+            "울산": "울산광역시", "세종": "세종특별자치시", "제주": "제주특별자치도",
+        }
+        for k, v in mapping.items():
+            if name.startswith(k):
+                return name.replace(k, v)
+        return name
+
+    df["지역"] = df["지역"].apply(normalize_region)
+
+    st.subheader("📈 병합 결과")
+    st.dataframe(df.head())
 
     # -----------------------------
     # 🗺️ 지도 시각화
     # -----------------------------
-    geojson_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
-    geojson = requests.get(geojson_url).json()
+    geo_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
+    geojson = requests.get(geo_url).json()
 
-    # geojson의 지역명 정리
-    geo_names = [re.sub(r'[^가-힣]', '', g["properties"]["name"]) for g in geojson["features"]]
-
-    # 데이터 매칭 보정
-    df["지역_매칭"] = df["지역"].apply(
-        lambda x: next((g for g in geo_names if g in x or x in g), None)
-    )
-
-    df_map = df.dropna(subset=["지역_매칭"])
+    # 지역명 추출
+    geo_names = [g["properties"]["name"] for g in geojson["features"]]
+    df["지역_매칭"] = df["지역"].apply(lambda x: next((n for n in geo_names if n in x), None))
 
     fig = px.choropleth(
-        df_map,
+        df.dropna(subset=["지역_매칭"]),
         geojson=geojson,
         locations="지역_매칭",
         featureidkey="properties.name",
-        color="의료_접근성_점수",
+        color="의료기관비율",
         color_continuous_scale="RdYlGn",
-        title="시·군·구별 독거노인 대비 의료 접근성 점수 (보로노이 개념 기반)",
-        range_color=(df_map["의료_접근성_점수"].min(), df_map["의료_접근성_점수"].max())
+        title="시군구별 독거노인 대비 의료기관 접근성",
     )
 
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="#f5f5f5")
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.info("👆 사이드바에서 두 개의 파일을 모두 업로드해주세요.")
+    st.info("👆 사이드바에서 두 개의 파일을 업로드해주세요.")
