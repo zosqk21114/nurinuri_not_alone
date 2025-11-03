@@ -10,8 +10,8 @@ st.set_page_config(page_title="독거노인 대비 의료기관 분포 분석", 
 st.title("🏥 지역별 독거노인 인구 대비 의료기관 분포 분석 (보로노이 개념 기반)")
 
 st.markdown("""
-이 앱은 **독거노인 인구수**와 **의료기관 수**를 비교하여  
-보로노이 개념 기반의 **의료 접근성 점수**를 계산합니다.
+이 앱은 **독거노인 관련 인구 데이터**와 **의료기관 분포 데이터**를 결합하여  
+보로노이 개념을 기반으로 한 **의료 접근성 점수**를 제공합니다.
 
 - 🟥 **빨간색**: 의료 접근성이 낮음 (독거노인 대비 의료기관 부족)  
 - 🟩 **초록색**: 의료 접근성이 높음 (의료기관이 충분하거나 집중 분포)
@@ -78,7 +78,7 @@ if df_elder is not None and df_facility is not None:
         return name
 
     # -----------------------------
-    # 🧭 독거노인 지역 추출
+    # 👵 독거노인 데이터 전처리
     # -----------------------------
     elder_region_col = [c for c in df_elder.columns if "지역" in c or "시도" in c or "행정구역" in c]
     if elder_region_col:
@@ -88,20 +88,22 @@ if df_elder is not None and df_facility is not None:
 
     df_elder["지역"] = df_elder[elder_region].astype(str).apply(normalize_region)
 
-    # 독거노인 관련 컬럼 찾기
-    elder_candidates = [c for c in df_elder.columns if "독거" in c or "인구" in c or "가구비율" in c]
-    elder_candidates = [c for c in elder_candidates if "지역" not in c]
+    # 독거노인 관련 컬럼 자동 탐색 (강화)
+    elder_candidates = [
+        c for c in df_elder.columns
+        if any(k in c for k in ["독거", "1인가구", "65세", "노인", "고령", "비율"]) and "지역" not in c
+    ]
 
     if elder_candidates:
-        target_col = st.selectbox("독거노인 인구 컬럼 선택", elder_candidates)
+        target_col = st.selectbox("독거노인 인구(또는 비율) 컬럼 선택", elder_candidates)
     else:
-        st.error("❌ 독거노인 인구 관련 컬럼을 찾을 수 없습니다.")
-        st.stop()
+        st.warning("🔍 자동으로 찾지 못했습니다. 직접 선택해주세요.")
+        target_col = st.selectbox("독거노인 관련 컬럼 선택 (직접 지정)", df_elder.columns)
 
     df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors="coerce").fillna(0)
 
     # -----------------------------
-    # 🏥 의료기관 지역 추출
+    # 🏥 의료기관 데이터 전처리
     # -----------------------------
     fac_region_col = [c for c in df_facility.columns if "주소" in c or "지역" in c or "시도" in c]
     if fac_region_col:
@@ -112,7 +114,7 @@ if df_elder is not None and df_facility is not None:
     df_facility["지역"] = df_facility[fac_region].astype(str).apply(normalize_region)
 
     # -----------------------------
-    # 🧮 지역별 의료기관 수
+    # 🧮 지역별 의료기관 수 계산
     # -----------------------------
     df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관_수")
 
@@ -122,7 +124,7 @@ if df_elder is not None and df_facility is not None:
     df = pd.merge(df_elder, df_facility_grouped, on="지역", how="inner")
 
     # -----------------------------
-    # 📏 보로노이 개념 접근성 점수 계산
+    # 📏 보로노이 개념 기반 접근성 점수 계산
     # -----------------------------
     df["의료기관_비율"] = df["의료기관_수"] / (df[target_col].replace(0, 1))
     df["의료_접근성_점수"] = np.log1p(df["의료기관_비율"]) * 100
