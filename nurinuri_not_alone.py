@@ -23,18 +23,15 @@ facility_file = st.sidebar.file_uploader("의료기관 데이터 파일 (CSV 또
 # 🔍 파일 읽기 함수
 # -----------------------------
 def read_any(file):
-    """CSV 또는 XLSX 파일을 자동 인코딩 감지로 안전하게 읽기"""
     if file is None:
         return None
     try:
         if file.name.endswith(".csv"):
-            # 여러 인코딩 시도
-            for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr"]:
-                try:
-                    return pd.read_csv(file, encoding=enc)
-                except Exception:
-                    file.seek(0)
-            raise ValueError("CSV 파일 인코딩을 감지할 수 없습니다.")
+            raw = file.read()
+            try:
+                return pd.read_csv(io.BytesIO(raw), encoding="utf-8")
+            except UnicodeDecodeError:
+                return pd.read_csv(io.BytesIO(raw), encoding="cp949")
         elif file.name.endswith(".xlsx"):
             return pd.read_excel(file)
     except Exception as e:
@@ -59,8 +56,8 @@ if df_elder is not None and df_facility is not None:
     # -----------------------------
     # 🔠 지역 컬럼 자동 인식
     # -----------------------------
-    elder_region_col = [c for c in df_elder.columns if any(k in c for k in ["시도", "지역", "행정구역"])]
-    facility_region_col = [c for c in df_facility.columns if any(k in c for k in ["시도", "주소", "지역"])]
+    elder_region_col = [c for c in df_elder.columns if "시도" in c or "지역" in c or "행정구역" in c]
+    facility_region_col = [c for c in df_facility.columns if "시도" in c or "주소" in c or "지역" in c]
 
     elder_region = elder_region_col[0] if elder_region_col else st.selectbox("독거노인 지역 컬럼 선택", df_elder.columns)
     facility_region = facility_region_col[0] if facility_region_col else st.selectbox("의료기관 지역 컬럼 선택", df_facility.columns)
@@ -83,11 +80,34 @@ if df_elder is not None and df_facility is not None:
     if target_col is None:
         target_col = st.selectbox("독거노인 인구 컬럼 선택", df_elder.columns)
 
-    # 숫자 변환 (오류 방지)
     df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors='coerce').fillna(0)
 
     # 병합
     df = pd.merge(df_elder, df_facility_grouped, on="지역", how="inner")
+
+    # 🧭 시도명 통일 (GeoJSON 매칭용)
+    region_map = {
+        "서울": "서울특별시",
+        "부산": "부산광역시",
+        "대구": "대구광역시",
+        "인천": "인천광역시",
+        "광주": "광주광역시",
+        "대전": "대전광역시",
+        "울산": "울산광역시",
+        "세종": "세종특별자치시",
+        "경기": "경기도",
+        "강원": "강원도",
+        "충북": "충청북도",
+        "충남": "충청남도",
+        "전북": "전라북도",
+        "전남": "전라남도",
+        "경북": "경상북도",
+        "경남": "경상남도",
+        "제주": "제주특별자치도"
+    }
+    df["지역"] = df["지역"].replace(region_map)
+
+    # 0으로 나누는 오류 방지
     df["의료기관_비율"] = df["의료기관_수"] / (df[target_col].replace(0, 1) + 1e-9)
 
     st.subheader("📈 병합 결과 데이터")
@@ -97,11 +117,7 @@ if df_elder is not None and df_facility is not None:
     # 🗺️ 지도 시각화
     # -----------------------------
     geojson_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_provinces_geo_simple.json"
-    try:
-        geojson = requests.get(geojson_url).json()
-    except Exception:
-        st.error("⚠️ 지도 데이터를 불러올 수 없습니다. 인터넷 연결을 확인하세요.")
-        st.stop()
+    geojson = requests.get(geojson_url).json()
 
     fig = px.choropleth(
         df,
