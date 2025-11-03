@@ -39,7 +39,6 @@ def read_any(file):
             except UnicodeDecodeError:
                 return pd.read_csv(io.BytesIO(raw), encoding="cp949")
         elif file.name.endswith(".xlsx"):
-            # read_excel의 기본 동작은 첫 번째 시트를 읽습니다.
             return pd.read_excel(file)
     except Exception as e:
         st.error(f"파일 읽기 오류: {e}")
@@ -77,7 +76,6 @@ if df_elder is not None and df_facility is not None:
         elder_region = st.selectbox("독거노인 지역 컬럼 선택", df_elder.columns, key="elder_region_sel")
         df_elder = df_elder.rename(columns={elder_region: '지역'})
 
-
     # 인구 컬럼 자동/수동 선택
     target_col_candidates = [c for c in df_elder.columns if '1인가구' in c and '65세이상' in c]
     if target_col_candidates:
@@ -103,13 +101,25 @@ if df_elder is not None and df_facility is not None:
     # 3. 지역명 자동 변환 (GeoJSON 매칭 보정)
     # -----------------------------
     def normalize_region(name):
-        name = str(name).strip()
+        name = str(name).strip().replace(" ", "")
         mapping = {
-            "서울": "서울특별시", "부산": "부산광역시", "대구": "대구광역시", "인천": "인천광역시",
-            "광주": "광주광역시", "대전": "대전광역시", "울산": "울산광역시", "세종": "세종특별자치시",
-            "경기": "경기도", "강원": "강원특별자치도", "충북": "충청북도", "충남": "충청남도",
-            "전북": "전북특별자치도", "전남": "전라남도", "경북": "경상북도", "경남": "경상남도",
-            "제주": "제주특별자치도"
+            "서울": "서울특별시", "서울시": "서울특별시",
+            "부산": "부산광역시", "부산시": "부산광역시",
+            "대구": "대구광역시", "대구시": "대구광역시",
+            "인천": "인천광역시", "인천시": "인천광역시",
+            "광주": "광주광역시", "광주시": "광주광역시",
+            "대전": "대전광역시", "대전시": "대전광역시",
+            "울산": "울산광역시", "울산시": "울산광역시",
+            "세종": "세종특별자치시", "세종시": "세종특별자치시",
+            "경기": "경기도", "경기도": "경기도",
+            "강원": "강원특별자치도", "강원도": "강원특별자치도",
+            "충북": "충청북도", "충청북": "충청북도", "충청북도": "충청북도",
+            "충남": "충청남도", "충청남": "충청남도", "충청남도": "충청남도",
+            "전북": "전북특별자치도", "전라북": "전북특별자치도", "전라북도": "전북특별자치도",
+            "전남": "전라남도", "전라남": "전라남도", "전라남도": "전라남도",
+            "경북": "경상북도", "경상북": "경상북도", "경상북도": "경상북도",
+            "경남": "경상남도", "경상남": "경상남도", "경상남도": "경상남도",
+            "제주": "제주특별자치도", "제주도": "제주특별자치도"
         }
         for key, val in mapping.items():
             if name.startswith(key):
@@ -118,6 +128,10 @@ if df_elder is not None and df_facility is not None:
 
     df_elder["지역"] = df_elder["지역"].apply(normalize_region)
     df_facility["지역"] = df_facility["지역"].apply(normalize_region)
+
+    # ✅ 혹시 남아 있는 공백 제거
+    df_elder["지역"] = df_elder["지역"].str.strip()
+    df_facility["지역"] = df_facility["지역"].str.strip()
 
     # -----------------------------
     # 4. 미리보기 및 시각화
@@ -169,7 +183,6 @@ if df_elder is not None and df_facility is not None:
             locations="지역",
             featureidkey="properties.name",
             color="독거노인_1000명당_의료기관_수",
-            # ⭐ 전국 평균을 색상 척도의 중앙값(노란색)으로 설정하여, 기준을 명확히 함
             color_continuous_scale="RdYlGn",
             color_continuous_midpoint=mean_ratio,
             title=f"시도별 독거노인 **1000명당** 의료기관 분포 (전국 평균: {mean_ratio:.2f})",
