@@ -10,6 +10,9 @@ st.title("🏥 지역별 독거노인 인구 대비 의료기관 분포 분석")
 st.markdown("""
 이 앱은 **지역별 독거노인 인구수**와 **의료기관 수**를 비교하여  
 얼마나 고르게 분포되어 있는지를 지도 위에서 시각화합니다.
+
+- 🟥 **빨간색**: 독거노인 인구 대비 의료기관이 **부족한 지역**  
+- 🟩 **초록색**: 독거노인 인구 대비 의료기관이 **많은 지역**
 """)
 
 # -----------------------------
@@ -125,14 +128,15 @@ if df_elder is not None and df_facility is not None:
         locations="지역",
         featureidkey="properties.name",
         color="의료기관_비율",
-        color_continuous_scale=["#d9d9d9", "#a8ddb5", "#43a2ca", "#006d2c"],  # 회색 → 연초록 → 진초록
-        title="시도별 독거노인 인구 대비 의료기관 분포"
+        color_continuous_scale="RdYlGn",  # 🔴→🟡→🟢 색상 (의료기관 적을수록 빨강, 많을수록 초록)
+        title="시도별 독거노인 인구 대비 의료기관 분포",
+        range_color=(df["의료기관_비율"].min(), df["의료기관_비율"].max())
     )
 
     fig.update_geos(
         fitbounds="locations",
         visible=False,
-        bgcolor="#f5f5f5"  # 배경을 살짝 회색으로
+        bgcolor="#f5f5f5"
     )
 
     st.plotly_chart(fig, use_container_width=True)
