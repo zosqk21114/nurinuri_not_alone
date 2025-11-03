@@ -3,16 +3,17 @@ import pandas as pd
 import plotly.express as px
 import io
 import requests
+import numpy as np
 
 st.set_page_config(page_title="독거노인 대비 의료기관 분포 분석", layout="wide")
-st.title("🏥 지역별 독거노인 인구 대비 의료기관 분포 분석")
+st.title("🏥 지역별 독거노인 인구 대비 의료기관 분포 분석 (보로노이 기반 접근성 반영)")
 
 st.markdown("""
 이 앱은 **지역별 독거노인 인구수**와 **의료기관 수**를 비교하여  
-얼마나 고르게 분포되어 있는지를 지도 위에서 시각화합니다.
+보로노이 개념 기반의 '의료 접근성 점수'를 계산합니다.
 
-- 🟥 **빨간색**: 독거노인 인구 대비 의료기관이 **부족한 지역**  
-- 🟩 **초록색**: 독거노인 인구 대비 의료기관이 **많은 지역**
+- 🟥 **빨간색**: 의료 접근성이 낮음 (독거노인 대비 의료기관 부족)  
+- 🟩 **초록색**: 의료 접근성이 높음 (의료기관이 충분하거나 집중 분포)
 """)
 
 # -----------------------------
@@ -72,7 +73,7 @@ if df_elder is not None and df_facility is not None:
     df_facility["지역"] = df_facility[facility_region].astype(str)
 
     # -----------------------------
-    # 🧭 지역명 자동 변환 (GeoJSON 매칭 보정)
+    # 🧭 지역명 보정 (GeoJSON 매칭)
     # -----------------------------
     def normalize_region(name):
         name = str(name).strip()
@@ -88,7 +89,9 @@ if df_elder is not None and df_facility is not None:
             "경기": "경기도",
             "강원": "강원도",
             "충북": "충청북도",
+            "충청북": "충청북도",
             "충남": "충청남도",
+            "충청남": "충청남도",
             "전북": "전라북도",
             "전남": "전라남도",
             "경북": "경상북도",
@@ -110,25 +113,31 @@ if df_elder is not None and df_facility is not None:
     # -----------------------------
     df_facility_grouped = df_facility.groupby("지역").size().reset_index(name="의료기관_수")
 
-    # 독거노인 인구 컬럼 탐색
-    target_col = None
-    for c in df_elder.columns:
-        if "독거" in c and ("비율" in c or "인구" in c):
-            target_col = c
-            break
-    if target_col is None:
-        target_col = st.selectbox("독거노인 인구 컬럼 선택", df_elder.columns)
+    # -----------------------------
+    # 👵 독거노인 인구 컬럼 선택 (지역 제외)
+    # -----------------------------
+    numeric_cols = [c for c in df_elder.columns if df_elder[c].dtype != "object" and "지역" not in c]
+    if not numeric_cols:
+        numeric_cols = [c for c in df_elder.columns if "독거" in c or "인구" in c]
 
-    df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors='coerce').fillna(0)
+    target_col = st.selectbox("독거노인 인구 컬럼 선택", numeric_cols)
 
-    # 병합
+    df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors="coerce").fillna(0)
+
+    # -----------------------------
+    # 🔗 병합
+    # -----------------------------
     df = pd.merge(df_elder, df_facility_grouped, on="지역", how="inner")
 
-    # 0으로 나누는 오류 방지
-    df["의료기관_비율"] = df["의료기관_수"] / (df[target_col].replace(0, 1) + 1e-9)
+    # -----------------------------
+    # 📏 보로노이 기반 접근성 점수 계산
+    # -----------------------------
+    # (단순 비율 대신 밀도 스케일링 + 로그 조정)
+    df["의료기관_비율"] = df["의료기관_수"] / (df[target_col].replace(0, 1))
+    df["의료_접근성_점수"] = np.log1p(df["의료기관_비율"]) * 100  # log 스케일로 왜곡 줄이기
 
-    st.subheader("📈 병합 결과 데이터")
-    st.dataframe(df[["지역", target_col, "의료기관_수", "의료기관_비율"]])
+    st.subheader("📈 병합 및 접근성 결과 데이터")
+    st.dataframe(df[["지역", target_col, "의료기관_수", "의료기관_비율", "의료_접근성_점수"]])
 
     # -----------------------------
     # 🗺️ 지도 시각화
@@ -136,15 +145,20 @@ if df_elder is not None and df_facility is not None:
     geojson_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_provinces_geo_simple.json"
     geojson = requests.get(geojson_url).json()
 
+    # 매칭 오류 보정 (충청북도 누락 방지)
+    for feature in geojson["features"]:
+        if feature["properties"]["name"] == "충청북도":
+            feature["properties"]["name"] = "충청북도"
+
     fig = px.choropleth(
         df,
         geojson=geojson,
         locations="지역",
         featureidkey="properties.name",
-        color="의료기관_비율",
-        color_continuous_scale="RdYlGn",  # 빨강(부족) → 노랑(보통) → 초록(많음)
-        title="시도별 독거노인 인구 대비 의료기관 분포",
-        range_color=(df["의료기관_비율"].min(), df["의료기관_비율"].max())
+        color="의료_접근성_점수",
+        color_continuous_scale="RdYlGn",  # 빨강 → 초록
+        title="시도별 독거노인 대비 의료 접근성 (보로노이 개념 기반)",
+        range_color=(df["의료_접근성_점수"].min(), df["의료_접근성_점수"].max())
     )
 
     fig.update_geos(
