@@ -48,24 +48,30 @@ df_facility = read_any(facility_file)
 if df_elder is not None and df_facility is not None:
     st.success("✅ 두 파일 모두 업로드 완료!")
 
-    # 🔹 독거노인 데이터
-    df_elder.columns = [c.strip() for c in df_elder.columns]
-    region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군", "구", "행정"])]
-    elder_val_cols = [c for c in df_elder.columns if any(k in c for k in ["독거", "노인", "비율", "인구"])]
+    # 🔹 컬럼명 전처리 (괄호, 공백 제거)
+    df_elder.columns = [re.sub(r"[\s\(\)%]+", "", c) for c in df_elder.columns]
+    df_facility.columns = [re.sub(r"[\s\(\)%]+", "", c) for c in df_facility.columns]
 
-    # 시도 + 시군구 결합
+    # 🔹 독거노인 지역 컬럼 탐색
+    region_cols = [c for c in df_elder.columns if any(k in c for k in ["시도", "시군", "구", "행정"])]
     if len(region_cols) >= 2:
         df_elder["지역"] = df_elder[region_cols[0]].astype(str) + " " + df_elder[region_cols[1]].astype(str)
     else:
         df_elder["지역"] = df_elder[region_cols[0]].astype(str)
 
-    # 독거노인 관련 컬럼 자동 선택
-    target_col = elder_val_cols[0]
+    # 🔹 독거노인 관련 컬럼 탐색 (없으면 사용자에게 선택)
+    elder_val_cols = [c for c in df_elder.columns if any(k in c for k in ["독거", "노인", "가구비율", "65세", "1인가구", "인구", "비율"])]
+    if len(elder_val_cols) == 0:
+        st.warning("⚠️ 독거노인 관련 컬럼을 자동으로 찾지 못했습니다. 직접 선택해주세요.")
+        target_col = st.selectbox("📊 독거노인 관련 컬럼 선택", df_elder.columns)
+    else:
+        target_col = elder_val_cols[0]
+        st.success(f"✅ 자동으로 '{target_col}' 컬럼이 선택되었습니다.")
+
     df_elder[target_col] = pd.to_numeric(df_elder[target_col], errors="coerce").fillna(0)
 
     # 🔹 의료기관 데이터
-    df_facility.columns = [c.strip() for c in df_facility.columns]
-    addr_col = [c for c in df_facility.columns if any(k in c for k in ["주소", "소재지", "시도명", "시군구명"])]
+    addr_col = [c for c in df_facility.columns if any(k in c for k in ["주소", "소재지", "시도명", "시군구명", "지역"])]
     addr_col = addr_col[0]
 
     def extract_region(addr):
@@ -115,7 +121,6 @@ if df_elder is not None and df_facility is not None:
     geo_url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_geo_simple.json"
     geojson = requests.get(geo_url).json()
 
-    # 지역명 추출
     geo_names = [g["properties"]["name"] for g in geojson["features"]]
     df["지역_매칭"] = df["지역"].apply(lambda x: next((n for n in geo_names if n in x), None))
 
